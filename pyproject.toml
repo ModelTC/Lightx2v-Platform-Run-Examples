@@ -1,0 +1,26 @@
+[tool.ruff]
+exclude = [
+    ".git",
+    ".mypy_cache",
+    ".ruff_cache",
+    ".venv",
+    "dist",
+    "build",
+    "__pycache__",
+    "*.egg-info",
+    ".pytest_cache",
+]
+target-version = "py311"
+line-length = 200
+indent-width = 4
+
+[tool.ruff.lint]
+extend-select = ["I", "F401"]
+ignore = ["F"]
+
+[tool.ruff.lint.per-file-ignores]
+"**/__init__.py" = ["F401"]
+
+[tool.ruff.lint.isort]
+known-first-party = ["lightx2v"]
+case-sensitive = true

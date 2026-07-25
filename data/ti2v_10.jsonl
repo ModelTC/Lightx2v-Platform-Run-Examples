@@ -1,0 +1,133 @@
+[
+    {
+      "id": "i2v_01",
+      "image": "images/01_park_bench_trash_removal.png",
+      "prompt": "Animate this park scene as a calm video. The camera slowly pushes toward the bench, tree leaves sway gently in a light breeze, soft shadows move across the pavement, and the trash can remains still. Keep the image composition and object shapes consistent.",
+      "motion_tags": [
+        "slow_push_in",
+        "leaf_motion",
+        "soft_shadow_shift"
+      ],
+      "task_type": "image_to_video",
+      "prompt_language": "en",
+      "prompt_length_chars": 255
+    },
+    {
+      "id": "i2v_02",
+      "image": "images/02_city_sunset_sky_edit.png",
+      "prompt": "Create a cinematic city shot from this image. Use a slow horizontal camera slide, make the streetlight glow flicker subtly, add mild movement to road reflections, and let the clouds drift across the sky. Do not alter building positions or the street layout.",
+      "motion_tags": [
+        "camera_slide",
+        "cloud_drift",
+        "reflection_motion"
+      ],
+      "task_type": "image_to_video",
+      "prompt_language": "en",
+      "prompt_length_chars": 257
+    },
+    {
+      "id": "i2v_03",
+      "image": "images/03_mug_replacement.png",
+      "prompt": "Turn the kitchen mug image into a cozy video. Keep the camera almost static, animate thin steam curling upward from the mug, add a slight warm light shimmer on the table, and preserve the cup shape, handle, background cabinets, and table perspective.",
+      "motion_tags": [
+        "steam_motion",
+        "light_shimmer",
+        "static_camera"
+      ],
+      "task_type": "image_to_video",
+      "prompt_language": "en",
+      "prompt_length_chars": 250
+    },
+    {
+      "id": "i2v_04",
+      "image": "images/04_portrait_studio_retouch.png",
+      "prompt": "Generate a natural portrait video. The subject should make a tiny natural head movement and blink once, while studio lighting softly brightens and fades. Keep the face identity, hair shape, clothing, background, and camera framing stable without adding new objects.",
+      "motion_tags": [
+        "blink",
+        "micro_head_motion",
+        "studio_light_shift"
+      ],
+      "task_type": "image_to_video",
+      "prompt_language": "en",
+      "prompt_length_chars": 265
+    },
+    {
+      "id": "i2v_05",
+      "image": "images/05_poster_text_removal.png",
+      "prompt": "Animate this poster-and-person image as a short clip. Add a gentle handheld camera feel, make the foreground person breathe subtly, and let the poster surface catch a small moving light reflection. Keep all text, clothing, facial features, and graphic layout unchanged.",
+      "motion_tags": [
+        "subtle_handheld",
+        "breathing_motion",
+        "poster_reflection"
+      ],
+      "task_type": "image_to_video",
+      "prompt_language": "en",
+      "prompt_length_chars": 269
+    },
+    {
+      "id": "i2v_06",
+      "image": "images/06_street_rain_addition.png",
+      "prompt": "Create a rainy street video from this image. Add fine rain falling diagonally, small ripples and wet reflections on the road, and slow walking motion for the pedestrians. Keep the buildings, road geometry, clothing colors, and camera viewpoint consistent across frames.",
+      "motion_tags": [
+        "rainfall",
+        "pedestrian_walk",
+        "wet_reflections"
+      ],
+      "task_type": "image_to_video",
+      "prompt_language": "en",
+      "prompt_length_chars": 269
+    },
+    {
+      "id": "i2v_07",
+      "image": "images/07_city_evening_conversion.png",
+      "prompt": "Turn the city image into an early-evening video. The camera slowly tilts upward, window lights glow softly, car headlights create mild reflection streaks, and the sky darkens just a little. Preserve the same cars, signs, buildings, and overall perspective.",
+      "motion_tags": [
+        "upward_tilt",
+        "window_glow",
+        "headlight_reflections"
+      ],
+      "task_type": "image_to_video",
+      "prompt_language": "en",
+      "prompt_length_chars": 256
+    },
+    {
+      "id": "i2v_08",
+      "image": "images/08_headphones_product_cleanup.png",
+      "prompt": "Make a product video from the headphones image. Use a slow orbiting camera move around the product, add a clean studio light sweep across the ear cups, and keep the headphones rigid and sharply defined. Do not change product geometry, color, or background style.",
+      "motion_tags": [
+        "product_orbit",
+        "light_sweep",
+        "rigid_object"
+      ],
+      "task_type": "image_to_video",
+      "prompt_language": "en",
+      "prompt_length_chars": 262
+    },
+    {
+      "id": "i2v_09",
+      "image": "images/09_workspace_tidying.png",
+      "prompt": "Animate the workspace image into a desk video. Use a slow top-down camera drift, make the desk lamp cast a soft moving highlight, and add very small cable and paper movement from airflow. Keep the laptop, notebook, wall, desk texture, and room layout stable.",
+      "motion_tags": [
+        "top_down_drift",
+        "lamp_highlight",
+        "small_airflow_motion"
+      ],
+      "task_type": "image_to_video",
+      "prompt_language": "en",
+      "prompt_length_chars": 258
+    },
+    {
+      "id": "i2v_10",
+      "image": "images/10_beach_cinematic_edit.png",
+      "prompt": "Create a cinematic beach video from this image. Waves should roll gently toward the shore, sunlight should shimmer across the water, the subject's hair and clothing should move slightly in the sea breeze, and the camera should slowly push in without changing identity or pose.",
+      "motion_tags": [
+        "waves",
+        "sunlight_shimmer",
+        "hair_cloth_breeze",
+        "slow_push_in"
+      ],
+      "task_type": "image_to_video",
+      "prompt_language": "en",
+      "prompt_length_chars": 276
+    }
+  ]

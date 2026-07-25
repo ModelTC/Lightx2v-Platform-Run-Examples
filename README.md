@@ -1,0 +1,212 @@
+# LightX2V Platform Run Examples
+
+本项目用于记录 [LightX2V](https://github.com/ModelTC/LightX2V) 在国产化计算平台上的运行示例，主要包括：
+
+- 单卡和分布式推理脚本；
+- 模型推理配置；
+- 推理服务启动脚本；
+- T2I、T2V 服务测速脚本及测试数据；
+- 不同平台、模型和配置下的测速结果留档。
+
+当前仓库主要收录 **昇腾 NPU（Ascend）** 的运行示例，后续可按相同目录结构扩展其他平台。
+
+## 目录结构
+
+```text
+.
+├── configs/                 # 各平台的模型推理配置
+│   └── ascend_npu/
+│       ├── single/          # 单卡配置
+│       ├── dist_2/          # 两卡配置
+│       └── dist_8/          # 八卡配置
+├── scripts/
+│   ├── lib/
+│   │   └── infer_runtime.sh     # 推理归档、通用预检、结果校验和进程管理
+│   ├── preflight_infer.py       # 入口、配置、设备及公共输入预检
+│   ├── run_record.py        # 生成并完成结构化 run.json
+│   ├── logging.sh           # 旧脚本兼容日志入口
+│   └── ascend/
+│       ├── infer/           # 离线推理脚本
+│       │   ├── single/
+│       │   ├── dist_2/
+│       │   └── dist_8/
+│       └── server/          # 推理服务启动脚本
+│           ├── single/
+│           └── dist/
+├── tests/                   # 服务测速脚本
+├── data/                    # 本机测速用 JSONL、图片和音频
+├── logs/                    # 运行日志（不提交到 Git）
+└── results/                 # 推理及测速结果（不提交到 Git）
+```
+
+目前仓库包含 Wan2.1、Wan2.1 Self-Forcing、Wan2.2 MoE、HunyuanVideo 1.5、LTX-2.3、FLUX.2-dev、Qwen-Image、LongCat-Image 和 Z-Image-Turbo 等模型示例，覆盖 T2I（文生图）、T2V（文生视频）和 S2V 等任务。
+
+当前单样本单卡正式测速范围是下文列出的 11 个全重 BF16 用例。Wan2.1 1.3B 仅保留官方推荐的 480p；Wan2.2 MoE 和 HunyuanVideo 1.5 分别保留 480p、720p；图像模型只保留 16:9 原生分辨率档。
+
+## 使用前准备
+
+本仓库的昇腾推理入口按当前测试机编写，路径和设备号直接写在各入口顶部，不通过路径环境变量覆盖：
+
+| 资源 | 本机固定路径 |
+| --- | --- |
+| Examples 项目 | `/data/wushuo1/Lightx2v-Platform-Run-Examples` |
+| LightX2V 主项目 | `/data/wushuo1/LightX2V` |
+| 模型权重根目录 | `/data/wushuo1/models` |
+| 推理配置 | `/data/wushuo1/Lightx2v-Platform-Run-Examples/configs/ascend_npu` |
+| 服务测速数据 | `/data/wushuo1/Lightx2v-Platform-Run-Examples/data` |
+| LTX-2.3 S2V 默认音频 | `/data/wushuo1/LightX2V/assets/inputs/audio/seko_input.mp3` |
+
+运行前确认：
+
+1. `/data/wushuo1/LightX2V` 可以在当前昇腾环境正常推理。
+2. 对应用例的权重已经位于 `/data/wushuo1/models/<模型目录>`。
+3. 配置文件和本地测试数据存在。
+4. 建议安装 `ffprobe` 以完整校验视频编码、分辨率和帧数；未安装时会退化为 MP4 容器签名校验，不影响启动推理。
+5. 单卡入口固定使用 NPU 0，Z-Image-Turbo 两卡入口固定使用 NPU 0、1，八卡入口固定使用 NPU 0–7。
+
+每个入口都采用与 LightX2V 主项目平台脚本一致的可读结构：先声明小写路径和用例参数，显式加载 `scripts/base/base.sh`，并在 `lightx2v_infer` 函数中完整写出 `python` 或 `torchrun` 命令。模型类别、任务、prompt、seed、配置和输出规格均以入口脚本为准。
+
+`scripts/lib/infer_runtime.sh` 不生成或隐藏模型命令。它只负责为入口创建本次运行目录、保存 stdout/stderr、执行公共预检、管理子进程和信号、生成 `run.json`，并校验最终图片或视频。
+
+## 单样本单卡推理
+
+所有配置均使用当前全重 BF16，不启用量化、蒸馏或特征缓存。配置文件名使用 `<case_id>.json`，入口脚本使用 `run_<case_id>.sh`，其中 `case_id` 明确包含模型版本、任务、分辨率及视频帧数。
+
+| 用例 | 目标规格 | 步数 | 首选 offload | 入口脚本 |
+| --- | --- | ---: | --- | --- |
+| Wan2.1 T2V 1.3B | 832×480，81 帧 | 50 | 无 | `run_wan21_1_3b_t2v_480p_81f.sh` |
+| Wan2.2 MoE T2V A14B | 832×480，81 帧 | 40 | DiT model | `run_wan22_moe_a14b_t2v_480p_81f.sh` |
+| Wan2.2 MoE T2V A14B | 1280×720，81 帧 | 40 | DiT model | `run_wan22_moe_a14b_t2v_720p_81f.sh` |
+| Wan2.1 Self-Forcing 1.3B | 832×480，81 帧 | 4 | 无 | `run_wan21_1_3b_self_forcing_t2v_480p_81f.sh` |
+| HunyuanVideo-1.5 T2V | 848×480，121 帧 | 50 | 仅 Qwen2.5-VL 编码器 | `run_hunyuan_video_15_t2v_480p_121f.sh` |
+| HunyuanVideo-1.5 T2V | 1264×720，121 帧 | 50 | 仅 Qwen2.5-VL 编码器 | `run_hunyuan_video_15_t2v_720p_121f.sh` |
+| LTX-2.3 S2V 22B dev | 768×512，241 帧 | 30 | DiT model + Gemma | `run_ltx2_3_22b_dev_s2v_768x512_241f.sh` |
+| Qwen-Image-2512 T2I | 1664×928 | 50 | 仅 Qwen2.5-VL 编码器 | `run_qwen_image_2512_t2i_1664x928.sh` |
+| LongCat-Image T2I | 1344×768 | 50 | 无 | `run_longcat_image_t2i_1344x768.sh` |
+| Z-Image-Turbo T2I | 1664×928 | 9（实际 8 NFE） | 无 | `run_z_image_turbo_t2i_1664x928.sh` |
+| FLUX.2-dev T2I | 1344×768 | 50 | block | `run_flux2_dev_t2i_1344x768.sh` |
+
+在项目根目录执行对应脚本。例如，使用单张昇腾 NPU 运行 Wan2.1 T2V：
+
+```bash
+cd /data/wushuo1/Lightx2v-Platform-Run-Examples
+bash scripts/ascend/infer/single/run_wan21_1_3b_t2v_480p_81f.sh
+```
+
+每次执行会生成不会互相覆盖的 `run_id`，日志和结果固定归档在本项目下：
+
+```text
+logs/ascend_npu/infer/<case_id>/<run_id>/
+├── run.log       # 从预检开始的完整 stdout/stderr、命令和运行结果摘要
+└── run.json      # 配置、版本、参数、状态、耗时指标及产物校验信息
+
+results/ascend_npu/infer/<case_id>/<run_id>/
+└── output.png|mp4
+```
+
+只有 LightX2V 子进程退出码为 0 且结果文件存在、非空并通过格式可读性校验时，`run.json` 才会标记为 `succeeded`。失败或中断的 `run.log`、`run.json` 和已产生的文件同样保留。`run.json` 通过结果路径、文件大小和 SHA-256 与产物对应。
+
+`run.json` 会保留配置快照和 SHA-256、入口及主项目参考脚本、LightX2V Git commit、Python/关键依赖版本、NPU 信息、完整 prompt/seed，以及从 LightX2V `[Profile]` 日志提取的模型加载、文本编码、DiT、VAE、Pipeline、Total Cost。存在对应原始指标时，还会计算 DiT 单步耗时、视频生成帧吞吐或图片吞吐；缺失值保持 `null`，不会猜测。
+
+## 单样本多卡推理
+
+多卡入口只保留能让同一个样本有效使用全部进程的配置。八卡配置统一位于 `configs/ascend_npu/dist_8/`，两卡 Z-Image-Turbo 配置位于 `configs/ascend_npu/dist_2/`；不保留四卡目录。
+
+| 模型 | 卡数与并行策略 | 目标规格 | 首选 offload | 配置与入口 |
+| --- | --- | --- | --- | --- |
+| Wan2.1 T2V 1.3B | 8，CFG2×SP4 | 832×480，81 帧 | 无 | `wan21_1_3b_t2v_480p_81f_cfg2_sp4.json` / `run_wan21_1_3b_t2v_480p_81f_cfg2_sp4.sh` |
+| Wan2.2 MoE T2V A14B | 8，CFG2×SP4 | 832×480，81 帧 | DiT model | `wan22_moe_a14b_t2v_480p_81f_cfg2_sp4.json` / `run_wan22_moe_a14b_t2v_480p_81f_cfg2_sp4.sh` |
+| Wan2.2 MoE T2V A14B | 8，TP8 | 832×480，81 帧 | 无 | `wan22_moe_a14b_t2v_480p_81f_tp8.json` / `run_wan22_moe_a14b_t2v_480p_81f_tp8.sh` |
+| Wan2.2 MoE T2V A14B | 8，CFG2×SP4 | 1280×720，81 帧 | DiT model | `wan22_moe_a14b_t2v_720p_81f_cfg2_sp4.json` / `run_wan22_moe_a14b_t2v_720p_81f_cfg2_sp4.sh` |
+| Wan2.2 MoE T2V A14B | 8，TP8 | 1280×720，81 帧 | 无 | `wan22_moe_a14b_t2v_720p_81f_tp8.json` / `run_wan22_moe_a14b_t2v_720p_81f_tp8.sh` |
+| HunyuanVideo-1.5 T2V | 8，CFG2×SP4 | 848×480，121 帧 | Qwen2.5-VL | `hunyuan_video_15_t2v_480p_121f_cfg2_sp4.json` / `run_hunyuan_video_15_t2v_480p_121f_cfg2_sp4.sh` |
+| HunyuanVideo-1.5 T2V | 8，CFG2×SP4 | 1264×720，121 帧 | Qwen2.5-VL | `hunyuan_video_15_t2v_720p_121f_cfg2_sp4.json` / `run_hunyuan_video_15_t2v_720p_121f_cfg2_sp4.sh` |
+| LTX-2.3 S2V 22B dev | 8，SP8 | 768×512，241 帧 | DiT model + Gemma | `ltx2_3_22b_dev_s2v_768x512_241f_sp8.json` / `run_ltx2_3_22b_dev_s2v_768x512_241f_sp8.sh` |
+| FLUX.2-dev T2I | 8，TP8 | 1344×768 | 无 | `flux2_dev_t2i_1344x768_tp8.json` / `run_flux2_dev_t2i_1344x768_tp8.sh` |
+| Qwen-Image-2512 T2I | 8，CFG2×SP4 | 1664×928 | Qwen2.5-VL | `qwen_image_2512_t2i_1664x928_cfg2_sp4.json` / `run_qwen_image_2512_t2i_1664x928_cfg2_sp4.sh` |
+| LongCat-Image T2I | 8，CFG2×SP4 | 1344×768 | 无 | `longcat_image_t2i_1344x768_cfg2_sp4.json` / `run_longcat_image_t2i_1344x768_cfg2_sp4.sh` |
+| Z-Image-Turbo T2I | 2，SP2 | 1664×928 | 无 | `z_image_turbo_t2i_1664x928_sp2.json` / `run_z_image_turbo_t2i_1664x928_sp2.sh` |
+
+Wan2.1 Self-Forcing 关闭了 CFG，并且 12 个 attention heads 不能被 8 整除，因此没有创建无效的八卡入口。Z-Image-Turbo 有 30 个 attention heads，同样不支持 SP8，按两卡 SP2 提供。
+
+Wan2.2 的 TP8 与 CFG2×SP4 是两组独立对照：TP8 会切分权重，使用无 offload 速度配置；CFG2×SP4 不切分权重，因此在 64 GiB 显存上保留 model 级 CPU offload。
+
+例如运行八卡 Wan2.1 480p：
+
+```bash
+cd /data/wushuo1/Lightx2v-Platform-Run-Examples
+bash scripts/ascend/infer/dist_8/run_wan21_1_3b_t2v_480p_81f_cfg2_sp4.sh
+```
+
+八卡入口固定使用 `ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7`，Z-Image-Turbo 两卡入口固定使用 `0,1`。所有多卡入口均在脚本中显式写出 `torchrun` 命令，并沿用单卡相同的 `run.log`、`run.json` 和结果文件归档格式；`run.json` 额外记录 `benchmark.parallel_strategy`。多卡日志中的规范化 Profile 指标取各 rank 的最大耗时，表示决定整次推理速度的最慢 rank。
+
+## 启动服务
+
+以单卡 Wan2.1 T2V 服务为例：
+
+```bash
+cd /data/wushuo1/Lightx2v-Platform-Run-Examples
+bash scripts/ascend/server/single/start_server_wan21_t2v.sh
+```
+
+服务脚本默认监听 `8000` 端口。分布式服务位于 `scripts/ascend/server/dist/`。
+
+## 服务测速
+
+测速数据为 JSONL 格式，每行包含 `prompt` 和 `seed`：
+
+```json
+{"prompt": "A cat running on the grass.", "seed": 42}
+```
+
+先启动对应服务，再运行测速脚本。
+
+T2V 异步服务测速：
+
+```bash
+python /data/wushuo1/Lightx2v-Platform-Run-Examples/tests/bench_t2v_service.py \
+  --url http://127.0.0.1:8000 \
+  --data /data/wushuo1/Lightx2v-Platform-Run-Examples/data/t2v_10.jsonl \
+  --concurrency 1 \
+  --platform ascend_npu \
+  --result-root /data/wushuo1/Lightx2v-Platform-Run-Examples/results \
+  --source-script /data/wushuo1/Lightx2v-Platform-Run-Examples/scripts/ascend/infer/single/run_wan21_1_3b_t2v_480p_81f.sh \
+  --service-script /data/wushuo1/Lightx2v-Platform-Run-Examples/scripts/ascend/server/single/start_server_wan21_t2v.sh \
+  --model-config /data/wushuo1/Lightx2v-Platform-Run-Examples/configs/ascend_npu/single/wan21_1_3b_t2v_480p_81f.json
+```
+
+T2I 同步服务测速：
+
+```bash
+python /data/wushuo1/Lightx2v-Platform-Run-Examples/tests/bench_t2i_service.py \
+  --url http://127.0.0.1:8000 \
+  --data /data/wushuo1/Lightx2v-Platform-Run-Examples/data/t2i_100.jsonl \
+  --request-mode sync \
+  --concurrency 1 \
+  --platform ascend_npu \
+  --result-root /data/wushuo1/Lightx2v-Platform-Run-Examples/results \
+  --source-script /data/wushuo1/Lightx2v-Platform-Run-Examples/scripts/ascend/infer/single/run_flux2_dev_t2i_1344x768.sh \
+  --service-script /data/wushuo1/Lightx2v-Platform-Run-Examples/scripts/ascend/server/single/start_server_flux2_dev.sh \
+  --model-config /data/wushuo1/Lightx2v-Platform-Run-Examples/configs/ascend_npu/single/flux2_dev_t2i_1344x768.json
+```
+
+可使用 `--concurrency`、`--limit` 和 `--repeat` 调整并发数、样本数及重复次数。测速结果会记录请求成功率、端到端延迟、首个结果耗时、吞吐量以及本次运行所用的脚本和配置路径。
+
+查看全部参数：
+
+```bash
+python /data/wushuo1/Lightx2v-Platform-Run-Examples/tests/bench_t2i_service.py --help
+python /data/wushuo1/Lightx2v-Platform-Run-Examples/tests/bench_t2v_service.py --help
+```
+
+## 结果记录建议
+
+为了便于横向对比，每次测速建议至少记录以下信息：
+
+- 芯片型号、设备数量及驱动/CANN 版本；
+- LightX2V 版本或 Git commit；
+- 模型、任务类型和配置文件；
+- 输入分辨率、生成长度、推理步数及精度；
+- 并发数、请求数、延迟、吞吐量和峰值显存。
+
+新增平台时，建议沿用 `configs/<platform>/{single,dist_<卡数>}` 和 `scripts/<platform>/infer/{single,dist_<卡数>}` 的目录约定。
