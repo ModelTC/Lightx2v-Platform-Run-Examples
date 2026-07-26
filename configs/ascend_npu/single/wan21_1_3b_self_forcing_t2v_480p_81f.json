@@ -13,6 +13,7 @@
     "cpu_offload": false,
     "dit_original_ckpt": "/data/wushuo1/models/Self-Forcing/checkpoints/self_forcing_dmd.pt",
     "causal_rope_type": "wan_causal_rope",
+    "causal_rope_compute_dtype": "float32",
     "modulate_type": "torch",
     "rope_type": "npu_rope",
     "layer_norm_type": "npu_layer_norm",
