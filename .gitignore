@@ -4,4 +4,6 @@ __pycache__/
 *.py[cod]
 .pytest_cache/
 .ruff_cache/
-/tests/
+/tests/*
+!/tests/test_run_service_suite.py
+!/tests/test_service_benchmark.py
