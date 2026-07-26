@@ -142,62 +142,62 @@ bash scripts/ascend/infer/dist_8/run_wan21_1_3b_t2v_480p_81f_cfg2_sp4.sh
 
 ## 启动服务
 
-以单卡 Wan2.1 T2V 服务为例：
+多卡服务入口与 `scripts/ascend/infer/dist_2`、`dist_8` 的测试配置一一对应。例如启动八卡 Wan2.1 T2V 服务：
 
 ```bash
 cd /data/wushuo1/Lightx2v-Platform-Run-Examples
-bash scripts/ascend/server/single/start_server_wan21_t2v.sh
+bash scripts/ascend/server/dist/start_server_wan21_1_3b_t2v_480p_81f_cfg2_sp4.sh
 ```
 
-服务脚本默认监听 `8000` 端口。分布式服务位于 `scripts/ascend/server/dist/`。
+服务默认监听 `8000` 端口，Prometheus 指标端口为 `8001`。可通过 `PORT`、`METRIC_PORT` 和 `MASTER_PORT` 覆盖。
 
 ## 服务测速
 
-测速数据为 JSONL 格式，每行包含 `prompt` 和 `seed`：
+测速数据为 JSONL 格式。T2I/T2V 每行包含 `prompt` 和 `seed`；S2V 额外包含 `audio_path`：
 
 ```json
 {"prompt": "A cat running on the grass.", "seed": 42}
+{"prompt": "A woman speaking.", "seed": 42, "audio_path": "audios/01.mp3"}
 ```
 
-先启动对应服务，再运行测速脚本。
-
-T2V 异步服务测速：
+推荐先用 dry-run 校验当前 12 个分布式服务、配置、数据和命令：
 
 ```bash
-python /data/wushuo1/Lightx2v-Platform-Run-Examples/tests/bench_t2v_service.py \
-  --url http://127.0.0.1:8000 \
-  --data /data/wushuo1/Lightx2v-Platform-Run-Examples/data/t2v_10.jsonl \
-  --concurrency 1 \
-  --platform ascend_npu \
-  --result-root /data/wushuo1/Lightx2v-Platform-Run-Examples/results \
-  --source-script /data/wushuo1/Lightx2v-Platform-Run-Examples/scripts/ascend/infer/single/run_wan21_1_3b_t2v_480p_81f.sh \
-  --service-script /data/wushuo1/Lightx2v-Platform-Run-Examples/scripts/ascend/server/single/start_server_wan21_t2v.sh \
-  --model-config /data/wushuo1/Lightx2v-Platform-Run-Examples/configs/ascend_npu/single/wan21_1_3b_t2v_480p_81f.json
+cd /data/wushuo1/Lightx2v-Platform-Run-Examples
+python scripts/run_service_suite.py --dry-run
 ```
 
-T2I 同步服务测速：
+执行完整服务测速：
 
 ```bash
-python /data/wushuo1/Lightx2v-Platform-Run-Examples/tests/bench_t2i_service.py \
-  --url http://127.0.0.1:8000 \
-  --data /data/wushuo1/Lightx2v-Platform-Run-Examples/data/t2i_100.jsonl \
-  --request-mode sync \
-  --concurrency 1 \
-  --platform ascend_npu \
-  --result-root /data/wushuo1/Lightx2v-Platform-Run-Examples/results \
-  --source-script /data/wushuo1/Lightx2v-Platform-Run-Examples/scripts/ascend/infer/single/run_flux2_dev_t2i_1344x768.sh \
-  --service-script /data/wushuo1/Lightx2v-Platform-Run-Examples/scripts/ascend/server/single/start_server_flux2_dev.sh \
-  --model-config /data/wushuo1/Lightx2v-Platform-Run-Examples/configs/ascend_npu/single/flux2_dev_t2i_1344x768.json
+python scripts/run_service_suite.py
 ```
 
-可使用 `--concurrency`、`--limit` 和 `--repeat` 调整并发数、样本数及重复次数。测速结果会记录请求成功率、端到端延迟、首个结果耗时、吞吐量以及本次运行所用的脚本和配置路径。
-
-查看全部参数：
+默认对每个服务执行一次不计入统计的 warm-up，再以并发 1 测量 10 个样本。T2I 使用同步 PNG 接口；T2V 和 LTX2.3 S2V 使用异步任务接口。只执行指定 case：
 
 ```bash
-python /data/wushuo1/Lightx2v-Platform-Run-Examples/tests/bench_t2i_service.py --help
-python /data/wushuo1/Lightx2v-Platform-Run-Examples/tests/bench_t2v_service.py --help
+python scripts/run_service_suite.py \
+  --only wan21_1_3b_t2v_480p_81f_cfg2_sp4
 ```
+
+日志写入 `logs/ascend_npu/server/<suite_id>/`，结果写入 `results/ascend_npu/server/<suite_id>/`，两边使用相同的 `suite_id`。每个 case 保留：
+
+- 服务、warm-up 和正式客户端日志；
+- 测试前后的 Prometheus 指标及 NPU 状态；
+- p50、p90、平均/最小/最大端到端延迟、吞吐量和成功率；
+- 每个请求的 task ID、耗时、错误、结果路径、文件大小和 SHA256；
+- 生成的 PNG/MP4、Git 状态、配置和数据文件校验值。
+
+任何正式样本失败都会使该 case 失败。统计中不包含 p95 和 p99。
+
+也可在已经启动服务时单独运行通用 benchmark：
+
+```bash
+python bench_t2i_service.py --help
+python bench_t2v_service.py --help
+```
+
+suite 只会终止自己创建的进程组。若测试前发现无法确认归属的 NPU 进程或端口占用，会停止测试而不会直接清理外部进程。
 
 ## 结果记录建议
 
