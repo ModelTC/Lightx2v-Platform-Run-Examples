@@ -2,8 +2,8 @@
 """Create and finalize a structured record for one inference run.
 
 The model-specific shell entrypoints pass metadata through environment
-variables.  This utility deliberately avoids importing torch/torch_npu so that
-record keeping does not initialize an accelerator runtime.
+variables.  This utility deliberately avoids importing accelerator-specific
+torch extensions so that record keeping does not initialize a device runtime.
 """
 
 from __future__ import annotations
@@ -19,6 +19,7 @@ import socket
 import struct
 import subprocess
 import sys
+import tempfile
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -56,6 +57,69 @@ def env_float(name: str) -> float | None:
         return float(value)
     except ValueError:
         return None
+
+
+def first_env(*names: str) -> str:
+    for name in names:
+        value = env(name)
+        if value:
+            return value
+    return ""
+
+
+def first_env_int(*names: str) -> int | None:
+    for name in names:
+        value = env_int(name)
+        if value is not None:
+            return value
+    return None
+
+
+def device_context(platform_name: str) -> dict[str, Any]:
+    platform_folded = platform_name.casefold()
+    if "mlu" in platform_folded:
+        device_type = "mlu"
+    elif "metax" in platform_folded or "cuda" in platform_folded:
+        device_type = "cuda"
+    elif "ascend" in platform_folded or "npu" in platform_folded:
+        device_type = "npu"
+    else:
+        device_type = env("DEVICE_TYPE", "npu")
+    device_identity = f"{device_type}:{platform_name}".casefold()
+    if "mlu" in device_identity:
+        family = "mlu"
+        default_visibility_environment = "MLU_VISIBLE_DEVICES"
+        count_environments = ("DEVICE_COUNT", "MLU_COUNT", "WORLD_SIZE")
+    elif (
+        device_type.casefold() in {"cuda", "gpu"}
+        or "metax" in device_identity
+        or "cuda" in device_identity
+    ):
+        family = "cuda"
+        default_visibility_environment = "CUDA_VISIBLE_DEVICES"
+        count_environments = ("DEVICE_COUNT", "GPU_COUNT", "WORLD_SIZE")
+    else:
+        family = "npu"
+        default_visibility_environment = "ASCEND_RT_VISIBLE_DEVICES"
+        count_environments = ("DEVICE_COUNT", "NPU_COUNT", "WORLD_SIZE")
+    visibility_environment = env(
+        "DEVICE_VISIBILITY_ENV",
+        default_visibility_environment,
+    )
+    visible_devices = first_env(
+        visibility_environment,
+        default_visibility_environment,
+        "VISIBLE_DEVICES",
+    )
+    count = first_env_int(*count_environments)
+    return {
+        "type": device_type,
+        "family": family,
+        "visibility_environment": visibility_environment,
+        "visible_devices": visible_devices,
+        "selected_device": env("DEVICE_ID", visible_devices),
+        "count": count,
+    }
 
 
 def utc_now() -> str:
@@ -114,7 +178,11 @@ def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
             pass
 
 
-def run_command(arguments: list[str], timeout: int = 10) -> dict[str, Any]:
+def run_command(
+    arguments: list[str],
+    timeout: int = 10,
+    environment: dict[str, str] | None = None,
+) -> dict[str, Any]:
     try:
         completed = subprocess.run(
             arguments,
@@ -122,6 +190,7 @@ def run_command(arguments: list[str], timeout: int = 10) -> dict[str, Any]:
             capture_output=True,
             text=True,
             timeout=timeout,
+            env=environment,
         )
     except (OSError, subprocess.SubprocessError) as exc:
         return {
@@ -140,6 +209,45 @@ def run_command(arguments: list[str], timeout: int = 10) -> dict[str, Any]:
     }
 
 
+def unavailable_command(arguments: list[str], error: str) -> dict[str, Any]:
+    return {
+        "command": arguments,
+        "return_code": None,
+        "stdout": "",
+        "stderr": "",
+        "error": error,
+    }
+
+
+def device_monitor_record(
+    platform_name: str,
+    device_type: str,
+) -> tuple[str, dict[str, Any]]:
+    device_identity = f"{device_type}:{platform_name}".casefold()
+    if "mlu" in device_identity:
+        monitor_name = "cnmon"
+        # The table view preserves every card's utilization, memory, firmware,
+        # driver and process snapshot without the huge output of ``cnmon info``.
+        arguments = ["cnmon", "all"]
+    elif "metax" in device_identity:
+        monitor_name = "mx-smi"
+        arguments = ["mx-smi"]
+    elif device_type.casefold() in {"cuda", "gpu"} or "cuda" in device_identity:
+        monitor_name = "nvidia-smi"
+        arguments = ["nvidia-smi"]
+    else:
+        monitor_name = "npu-smi"
+        arguments = ["npu-smi", "info"]
+
+    monitor_path = shutil.which(monitor_name)
+    if not monitor_path:
+        return monitor_name, unavailable_command(
+            arguments,
+            f"{monitor_name} is not available",
+        )
+    return monitor_name, run_command([monitor_path, *arguments[1:]], timeout=15)
+
+
 def git_record(repository: str) -> dict[str, Any]:
     path = Path(repository).expanduser()
     record: dict[str, Any] = {
@@ -152,22 +260,57 @@ def git_record(repository: str) -> dict[str, Any]:
     if not path.is_dir():
         return record
 
-    inside = run_command(["git", "-C", str(path), "rev-parse", "--is-inside-work-tree"])
-    if inside["return_code"] != 0 or inside["stdout"].strip() != "true":
-        return record
-    record["is_git_repository"] = True
+    resolved_path = str(path.resolve(strict=False))
+    escaped_path = (
+        resolved_path.replace("\\", "\\\\")
+        .replace('"', '\\"')
+        .replace("\n", "\\n")
+    )
+    with tempfile.NamedTemporaryFile(
+        mode="w",
+        encoding="utf-8",
+        prefix="lightx2v-run-record-git-",
+    ) as git_config:
+        git_config.write(f'[safe]\n\tdirectory = "{escaped_path}"\n')
+        git_config.flush()
+        git_environment = os.environ.copy()
+        git_environment["GIT_CONFIG_GLOBAL"] = git_config.name
+        git_command = ["git", "-C", str(path)]
 
-    commit = run_command(["git", "-C", str(path), "rev-parse", "HEAD"])
-    if commit["return_code"] == 0:
-        record["commit"] = commit["stdout"].strip() or None
+        inside = run_command(
+            [*git_command, "rev-parse", "--is-inside-work-tree"],
+            environment=git_environment,
+        )
+        if inside["return_code"] != 0 or inside["stdout"].strip() != "true":
+            return record
+        record["is_git_repository"] = True
 
-    branch = run_command(["git", "-C", str(path), "branch", "--show-current"])
-    if branch["return_code"] == 0:
-        record["branch"] = branch["stdout"].strip() or None
+        commit = run_command(
+            [*git_command, "rev-parse", "HEAD"],
+            environment=git_environment,
+        )
+        if commit["return_code"] == 0:
+            record["commit"] = commit["stdout"].strip() or None
 
-    status = run_command(["git", "-C", str(path), "status", "--porcelain", "--untracked-files=normal"])
-    if status["return_code"] == 0:
-        record["dirty"] = bool(status["stdout"].strip())
+        branch = run_command(
+            [*git_command, "branch", "--show-current"],
+            environment=git_environment,
+        )
+        if branch["return_code"] == 0:
+            record["branch"] = branch["stdout"].strip() or None
+
+        status = run_command(
+            [
+                *git_command,
+                "status",
+                "--porcelain",
+                "--untracked-files=normal",
+            ],
+            timeout=30,
+            environment=git_environment,
+        )
+        if status["return_code"] == 0:
+            record["dirty"] = bool(status["stdout"].strip())
     return record
 
 
@@ -175,6 +318,11 @@ def package_versions() -> dict[str, str | None]:
     distributions = {
         "torch": "torch",
         "torch_npu": "torch-npu",
+        "torch_mlu": "torch_mlu",
+        "torch_mlu_ops": "torch_mlu_ops",
+        "flash_attn": "flash-attn",
+        "sageattention": "sageattention",
+        "xformers": "xformers",
         "transformers": "transformers",
         "diffusers": "diffusers",
         "safetensors": "safetensors",
@@ -272,26 +420,39 @@ def build_start_record() -> dict[str, Any]:
     prompt = env("PROMPT")
     negative_prompt = env("NEGATIVE_PROMPT")
     errors = [config_error] if config_error else []
-
-    npu_smi_path = shutil.which("npu-smi")
-    npu_smi = (
-        run_command([npu_smi_path, "info"], timeout=15)
-        if npu_smi_path
-        else {
-            "command": ["npu-smi", "info"],
-            "return_code": None,
-            "stdout": "",
-            "stderr": "",
-            "error": "npu-smi is not available",
-        }
+    platform_name = env("PLATFORM", "ascend_npu")
+    device = device_context(platform_name)
+    monitor_name, device_monitor = device_monitor_record(
+        platform_name,
+        device["type"],
     )
+    hardware: dict[str, Any] = {
+        "hostname": socket.gethostname(),
+        "machine": platform.machine(),
+        "processor": platform.processor(),
+        "device_type": device["type"],
+        "device_memory_gib": env_float("DEVICE_MEMORY_GIB"),
+        "device_monitor": {
+            "name": monitor_name,
+            **device_monitor,
+        },
+    }
+    if monitor_name == "cnmon":
+        hardware["cnmon"] = device_monitor
+    elif monitor_name == "mx-smi":
+        hardware["mx_smi"] = device_monitor
+    elif monitor_name == "nvidia-smi":
+        hardware["nvidia_smi"] = device_monitor
+    else:
+        # Preserve the original Ascend schema for existing report consumers.
+        hardware["npu_smi"] = device_monitor
 
     record: dict[str, Any] = {
         "schema_version": SCHEMA_VERSION,
         "run_id": env("RUN_ID"),
         "status": "running",
         "benchmark": {
-            "platform": env("PLATFORM", "ascend_npu"),
+            "platform": platform_name,
             "mode": env("RUN_MODE", "single_sample_single_card"),
             "case_id": env("CASE_ID"),
             "model_id": env("MODEL_ID"),
@@ -325,9 +486,12 @@ def build_start_record() -> dict[str, Any]:
             "lightx2v_path": str(Path(env("LIGHTX2V_PATH")).resolve(strict=False)),
             "model_path": str(Path(env("MODEL_PATH")).resolve(strict=False)),
             "device": {
-                "visible_devices": env("ASCEND_RT_VISIBLE_DEVICES"),
-                "selected_device": env("DEVICE_ID"),
-                "count": env_int("NPU_COUNT"),
+                "type": device["type"],
+                "family": device["family"],
+                "visibility_environment": device["visibility_environment"],
+                "visible_devices": device["visible_devices"],
+                "selected_device": device["selected_device"],
+                "count": device["count"],
             },
             "profiling_debug_level": env_int("PROFILING_DEBUG_LEVEL"),
         },
@@ -335,13 +499,7 @@ def build_start_record() -> dict[str, Any]:
             "examples": git_record(env("REPO_ROOT")),
             "lightx2v": git_record(env("LIGHTX2V_PATH")),
         },
-        "hardware": {
-            "hostname": socket.gethostname(),
-            "machine": platform.machine(),
-            "processor": platform.processor(),
-            "device_memory_gib": env_float("DEVICE_MEMORY_GIB"),
-            "npu_smi": npu_smi,
-        },
+        "hardware": hardware,
         "software": {
             "python": {
                 "version": platform.python_version(),
@@ -417,15 +575,35 @@ def validate_png(path: Path, expected_width: int | None, expected_height: int | 
         "width": None,
         "height": None,
         "image_format": None,
+        "channel_extrema": None,
     }
     try:
         from PIL import Image
 
-        details["method"] = "Pillow.Image.verify"
+        details["method"] = "Pillow.Image.verify + RGB extrema"
         with Image.open(path) as image:
             details["width"], details["height"] = image.size
             details["image_format"] = image.format
             image.verify()
+        # ``verify`` only checks the PNG container.  Decode the pixels in a
+        # second pass so a numerically failed inference that was quantized to
+        # an all-black/all-white image cannot be reported as successful.
+        with Image.open(path) as image:
+            extrema = image.convert("RGB").getextrema()
+        details["channel_extrema"] = [
+            [int(channel_min), int(channel_max)]
+            for channel_min, channel_max in extrema
+        ]
+        if all(
+            channel_min == 0 and channel_max == 0
+            for channel_min, channel_max in extrema
+        ):
+            details["errors"].append("PNG pixels are uniformly black")
+        elif all(
+            channel_min == 255 and channel_max == 255
+            for channel_min, channel_max in extrema
+        ):
+            details["errors"].append("PNG pixels are uniformly white")
     except ImportError:
         details["method"] = "PNG signature and IHDR"
         try:
@@ -484,6 +662,195 @@ def is_mp4_container(format_name: Any) -> bool:
     }
 
 
+def mp4_pixel_validation_record(
+    method: str | None = None,
+    *,
+    fallback_reason: str | None = None,
+) -> dict[str, Any]:
+    return {
+        "checked": method is not None,
+        "method": method,
+        "fallback_reason": fallback_reason,
+        "decoded_frames": None,
+        "channel_extrema": None,
+        "errors": [],
+    }
+
+
+def finish_mp4_rgb_extrema(
+    details: dict[str, Any],
+    decoded_frames: int,
+    extrema: list[list[int]],
+) -> dict[str, Any]:
+    details["decoded_frames"] = decoded_frames
+    details["channel_extrema"] = extrema
+    if decoded_frames <= 0:
+        details["errors"].append("MP4 pixel decode returned no frames")
+    elif all(
+        channel_min == 0 and channel_max == 0
+        for channel_min, channel_max in extrema
+    ):
+        details["errors"].append("MP4 pixels are uniformly black")
+    elif all(
+        channel_min == 255 and channel_max == 255
+        for channel_min, channel_max in extrema
+    ):
+        details["errors"].append("MP4 pixels are uniformly white")
+    return details
+
+
+def inspect_mp4_rgb_extrema_pyav(
+    path: Path,
+    *,
+    fallback_reason: str | None = None,
+) -> dict[str, Any]:
+    """Fully decode MP4 pixels with PyAV without counting plane padding."""
+    details: dict[str, Any] = {
+        **mp4_pixel_validation_record(
+            "PyAV full decode at 64x64 RGB24",
+            fallback_reason=fallback_reason,
+        ),
+    }
+    try:
+        import av
+    except ImportError as exc:
+        details["errors"].append(
+            f"PyAV is not available for MP4 pixel validation: {exc}"
+        )
+        return details
+
+    channel_minima = [255, 255, 255]
+    channel_maxima = [0, 0, 0]
+    decoded_frames = 0
+    try:
+        with av.open(str(path), mode="r") as container:
+            video_streams = [
+                stream
+                for stream in container.streams
+                if stream.type == "video"
+            ]
+            if not video_streams:
+                details["errors"].append("MP4 has no video stream")
+                return details
+            stream = video_streams[0]
+            for frame in container.decode(stream):
+                rgb_frame = frame.reformat(
+                    width=64,
+                    height=64,
+                    format="rgb24",
+                )
+                plane = rgb_frame.planes[0]
+                payload = bytes(plane)
+                line_size = int(plane.line_size)
+                row_size = 64 * 3
+                if line_size < row_size or len(payload) < line_size * 64:
+                    raise ValueError(
+                        "PyAV returned an invalid RGB plane layout"
+                    )
+                for row_index in range(64):
+                    row_start = row_index * line_size
+                    row = payload[row_start : row_start + row_size]
+                    for channel in range(3):
+                        samples = row[channel::3]
+                        channel_minima[channel] = min(
+                            channel_minima[channel],
+                            min(samples),
+                        )
+                        channel_maxima[channel] = max(
+                            channel_maxima[channel],
+                            max(samples),
+                        )
+                decoded_frames += 1
+    except Exception as exc:
+        details["decoded_frames"] = decoded_frames
+        details["errors"].append(
+            f"PyAV could not fully decode MP4 pixels: {exc}"
+        )
+        return details
+
+    extrema = [
+        [channel_minima[channel], channel_maxima[channel]]
+        for channel in range(3)
+    ]
+    return finish_mp4_rgb_extrema(details, decoded_frames, extrema)
+
+
+def inspect_mp4_rgb_extrema(path: Path) -> dict[str, Any]:
+    """Decode every frame at 64x64 and report per-channel RGB extrema."""
+    ffmpeg = shutil.which("ffmpeg")
+    if not ffmpeg:
+        return inspect_mp4_rgb_extrema_pyav(
+            path,
+            fallback_reason="ffmpeg is not available",
+        )
+
+    ffmpeg_check = run_command([ffmpeg, "-version"], timeout=10)
+    if ffmpeg_check["return_code"] != 0:
+        reason = (
+            ffmpeg_check["stderr"].strip()
+            or ffmpeg_check["error"]
+            or f"exit code {ffmpeg_check['return_code']}"
+        )
+        return inspect_mp4_rgb_extrema_pyav(
+            path,
+            fallback_reason=f"ffmpeg is unusable: {reason}",
+        )
+
+    details = mp4_pixel_validation_record(
+        "ffmpeg full decode at 64x64 RGB24"
+    )
+    command = [
+        ffmpeg,
+        "-v",
+        "error",
+        "-i",
+        str(path),
+        "-map",
+        "0:v:0",
+        "-vf",
+        "scale=64:64:flags=fast_bilinear",
+        "-pix_fmt",
+        "rgb24",
+        "-f",
+        "rawvideo",
+        "-",
+    ]
+    try:
+        completed = subprocess.run(
+            command,
+            check=False,
+            capture_output=True,
+            timeout=180,
+        )
+    except (OSError, subprocess.SubprocessError) as exc:
+        details["errors"].append(f"cannot decode MP4 pixels: {exc}")
+        return details
+    if completed.returncode != 0:
+        error = completed.stderr.decode("utf-8", errors="replace").strip()
+        details["errors"].append(
+            error or f"ffmpeg pixel decode exited with {completed.returncode}"
+        )
+        return details
+
+    frame_bytes = 64 * 64 * 3
+    payload = completed.stdout
+    if not payload:
+        details["errors"].append("ffmpeg pixel decode returned no frames")
+        return details
+    if len(payload) % frame_bytes:
+        details["errors"].append(
+            "ffmpeg pixel decode returned a partial RGB frame"
+        )
+        return details
+
+    decoded_frames = len(payload) // frame_bytes
+    extrema = [
+        [min(payload[channel::3]), max(payload[channel::3])]
+        for channel in range(3)
+    ]
+    return finish_mp4_rgb_extrema(details, decoded_frames, extrema)
+
+
 def validate_mp4(
     path: Path,
     expected_width: int | None,
@@ -504,6 +871,7 @@ def validate_mp4(
         "audio_codec": None,
         "audio_frames": None,
         "audio_samples": None,
+        "pixel_validation": mp4_pixel_validation_record(),
     }
     ffprobe = shutil.which("ffprobe")
     if not ffprobe:
@@ -714,6 +1082,24 @@ def validate_mp4(
             )
         ):
             details["errors"].append("audio stream has no decodable samples")
+
+    pixel_validation = inspect_mp4_rgb_extrema(path)
+    pixel_frames = parse_positive_int(
+        pixel_validation.get("decoded_frames")
+    )
+    metadata_frames = parse_positive_int(details["frames"])
+    if (
+        pixel_frames is not None
+        and metadata_frames is not None
+        and pixel_frames != metadata_frames
+    ):
+        pixel_validation["errors"].append(
+            "MP4 pixel decoder produced "
+            f"{pixel_frames} frames, metadata decoder produced "
+            f"{metadata_frames}"
+        )
+    details["pixel_validation"] = pixel_validation
+    details["errors"].extend(pixel_validation["errors"])
     return details
 
 
@@ -936,13 +1322,26 @@ def command_start(record_path: Path) -> int:
     record = build_start_record()
     atomic_write_json(record_path, record)
     print(f"[RunRecord] initialized: {record_path}")
-    npu_smi = record["hardware"]["npu_smi"]
-    if npu_smi["return_code"] == 0 and npu_smi["stdout"].strip():
-        print("[Environment] npu-smi info")
-        print(npu_smi["stdout"].rstrip())
+    monitor = record["hardware"]["device_monitor"]
+    monitor_name = monitor["name"]
+    if monitor["return_code"] == 0 and monitor["stdout"].strip():
+        if monitor_name in {"cnmon", "mx-smi"}:
+            print(
+                f"[Environment] {monitor_name} snapshot captured in run.json "
+                f"({len(monitor['stdout'].encode('utf-8'))} bytes)"
+            )
+        else:
+            print(f"[Environment] {monitor_name} info")
+            print(monitor["stdout"].rstrip())
     else:
-        reason = npu_smi["stderr"].strip() or npu_smi["error"] or f"exit code {npu_smi['return_code']}"
-        print(f"[RunRecord] warning: npu-smi info unavailable: {reason}")
+        reason = (
+            monitor["stderr"].strip()
+            or monitor["error"]
+            or f"exit code {monitor['return_code']}"
+        )
+        print(
+            f"[RunRecord] warning: {monitor_name} info unavailable: {reason}"
+        )
     return 0
 
 

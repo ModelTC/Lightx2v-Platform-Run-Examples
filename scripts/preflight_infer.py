@@ -5,15 +5,18 @@ from __future__ import annotations
 
 import argparse
 import json
+import os
 import re
 import shutil
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Sequence
 
-
 DEVICE_RE = re.compile(r"^[0-9]+$")
 STRATEGY_RE = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._-]*$")
+ENVIRONMENT_VARIABLE_RE = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
+METAX_MCCL_MIN_AVAILABLE_SHM_BYTES = 48 * 1024 * 1024
+METAX_MCCL_SHM_PATH = Path("/dev/shm")
 
 
 @dataclass(frozen=True)
@@ -29,9 +32,58 @@ class PreflightInputs:
     parallel_strategy: str
     result_ext: str
     audio_path: Path | None = None
+    platform: str = "ascend_npu"
+    device_type: str = "npu"
+    device_count: int | None = None
+    visible_devices_env: str = "ASCEND_RT_VISIBLE_DEVICES"
 
 
-def _positive_parallel_size(parallel: dict[str, Any], key: str, errors: list[str]) -> int:
+def metax_shared_memory_errors(
+    path: Path = METAX_MCCL_SHM_PATH,
+    minimum_available_bytes: int = METAX_MCCL_MIN_AVAILABLE_SHM_BYTES,
+) -> list[str]:
+    try:
+        filesystem = os.statvfs(path)
+        available_bytes = filesystem.f_bavail * filesystem.f_frsize
+    except OSError as exc:
+        return [f"cannot inspect MetaX MCCL shared memory at {path}: {exc}"]
+
+    if available_bytes >= minimum_available_bytes:
+        return []
+
+    stale_files = []
+    stale_bytes = 0
+    try:
+        for candidate in path.glob("mccl-*"):
+            try:
+                if candidate.is_file():
+                    stale_files.append(candidate)
+                    stale_bytes += candidate.stat().st_size
+            except FileNotFoundError:
+                # MCCL can remove a communicator file while preflight is
+                # inspecting the directory.  A vanished entry consumes no
+                # shared memory and must not turn the check into a failure.
+                continue
+    except OSError as exc:
+        return [f"cannot inspect MetaX MCCL files at {path}: {exc}"]
+
+    available_mib = available_bytes / (1024 * 1024)
+    required_mib = minimum_available_bytes / (1024 * 1024)
+    stale_mib = stale_bytes / (1024 * 1024)
+    return [
+        f"MetaX MCCL requires at least {required_mib:.0f} MiB free in "
+        f"{path}, but only {available_mib:.1f} MiB is available; found "
+        f"{len(stale_files)} mccl-* file(s) using {stale_mib:.1f} MiB. "
+        "Stop all MetaX distributed processes and quarantine their stale "
+        "mccl-* files before retrying."
+    ]
+
+
+def _positive_parallel_size(
+    parallel: dict[str, Any],
+    key: str,
+    errors: list[str],
+) -> int:
     value = parallel.get(key, 1)
     if isinstance(value, bool) or not isinstance(value, int) or value < 1:
         errors.append(f"config parallel.{key} must be a positive integer; got {value!r}")
@@ -51,25 +103,20 @@ def effective_parallel_size(config: dict[str, Any], errors: list[str]) -> int:
     cfg_size = _positive_parallel_size(parallel, "cfg_p_size", errors)
     sequence_size = _positive_parallel_size(parallel, "seq_p_size", errors)
     if tensor_size > 1 and (cfg_size > 1 or sequence_size > 1):
-        errors.append(
-            "tensor parallelism cannot be combined with CFG or sequence parallelism "
-            f"in this benchmark; got tp={tensor_size}, cfg={cfg_size}, sp={sequence_size}"
-        )
+        errors.append(f"tensor parallelism cannot be combined with CFG or sequence parallelism in this benchmark; got tp={tensor_size}, cfg={cfg_size}, sp={sequence_size}")
     return tensor_size if tensor_size > 1 else cfg_size * sequence_size
 
 
 def validate(inputs: PreflightInputs) -> list[str]:
     errors: list[str] = []
+    device_count = inputs.world_size if inputs.device_count is None else inputs.device_count
 
     if not inputs.repo_path.is_dir():
         errors.append(f"Examples repository does not exist: {inputs.repo_path}")
     if not inputs.lightx2v_path.is_dir():
         errors.append(f"LightX2V repository does not exist: {inputs.lightx2v_path}")
     elif not (inputs.lightx2v_path / "scripts" / "base" / "base.sh").is_file():
-        errors.append(
-            "LightX2V base script does not exist: "
-            f"{inputs.lightx2v_path / 'scripts' / 'base' / 'base.sh'}"
-        )
+        errors.append(f"LightX2V base script does not exist: {inputs.lightx2v_path / 'scripts' / 'base' / 'base.sh'}")
     if not inputs.model_path.is_dir():
         errors.append(f"model directory does not exist: {inputs.model_path}")
     if not inputs.source_script.is_file():
@@ -92,27 +139,31 @@ def validate(inputs: PreflightInputs) -> list[str]:
 
     if inputs.world_size < 1:
         errors.append(f"world_size must be a positive integer; got {inputs.world_size}")
+    elif inputs.platform == "metax_cuda" and inputs.world_size > 1:
+        errors.extend(metax_shared_memory_errors())
+    if device_count < 1:
+        errors.append(f"device_count must be a positive integer; got {device_count}")
+    elif device_count != inputs.world_size:
+        errors.append(f"device_count={device_count} must match world_size={inputs.world_size}")
+    if not STRATEGY_RE.fullmatch(inputs.platform):
+        errors.append(f"invalid platform: {inputs.platform!r}")
+    if not STRATEGY_RE.fullmatch(inputs.device_type):
+        errors.append(f"invalid device_type: {inputs.device_type!r}")
+    if not ENVIRONMENT_VARIABLE_RE.fullmatch(inputs.visible_devices_env):
+        errors.append(f"visible_devices_env must be an environment-variable name; got {inputs.visible_devices_env!r}")
 
     devices = inputs.visible_devices.split(",") if inputs.visible_devices else []
-    if len(devices) != inputs.world_size:
-        errors.append(
-            f"world_size={inputs.world_size} requires exactly {inputs.world_size} visible "
-            f"NPU device(s); got {inputs.visible_devices!r}"
-        )
+    if len(devices) != device_count:
+        errors.append(f"device_count={device_count} requires exactly {device_count} visible {inputs.device_type} device(s); got {inputs.visible_devices!r}")
     elif any(not DEVICE_RE.fullmatch(device) for device in devices):
-        errors.append(
-            "ASCEND_RT_VISIBLE_DEVICES must be a comma-separated list of numeric IDs; "
-            f"got {inputs.visible_devices!r}"
-        )
+        errors.append(f"{inputs.visible_devices_env} must be a comma-separated list of numeric IDs; got {inputs.visible_devices!r}")
     elif len(set(devices)) != len(devices):
-        errors.append(f"ASCEND_RT_VISIBLE_DEVICES contains duplicate IDs: {inputs.visible_devices!r}")
+        errors.append(f"{inputs.visible_devices_env} contains duplicate IDs: {inputs.visible_devices!r}")
 
     if not STRATEGY_RE.fullmatch(inputs.parallel_strategy):
         errors.append(f"invalid parallel_strategy: {inputs.parallel_strategy!r}")
     elif inputs.world_size == 1 and inputs.parallel_strategy != "single":
-        errors.append(
-            f"world_size=1 requires parallel_strategy='single'; got {inputs.parallel_strategy!r}"
-        )
+        errors.append(f"world_size=1 requires parallel_strategy='single'; got {inputs.parallel_strategy!r}")
     elif inputs.world_size > 1 and inputs.parallel_strategy == "single":
         errors.append("multi-card inference requires a non-single parallel_strategy")
 
@@ -120,18 +171,12 @@ def validate(inputs: PreflightInputs) -> list[str]:
         checkpoint = config.get("dit_original_ckpt")
         if checkpoint is not None:
             if not isinstance(checkpoint, str) or not checkpoint:
-                errors.append(
-                    "config dit_original_ckpt must be a non-empty local file path"
-                )
+                errors.append("config dit_original_ckpt must be a non-empty local file path")
             elif not Path(checkpoint).is_file():
-                errors.append(
-                    f"config dit_original_ckpt does not exist: {checkpoint}"
-                )
+                errors.append(f"config dit_original_ckpt does not exist: {checkpoint}")
         configured_size = effective_parallel_size(config, errors)
         if configured_size != inputs.world_size:
-            errors.append(
-                f"config parallel size is {configured_size}, but world_size is {inputs.world_size}"
-            )
+            errors.append(f"config parallel size is {configured_size}, but world_size is {inputs.world_size}")
 
     if inputs.audio_path is not None and not inputs.audio_path.is_file():
         errors.append(f"input audio does not exist: {inputs.audio_path}")
@@ -157,7 +202,14 @@ def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--source-script", type=Path, required=True)
     parser.add_argument("--reference-script", type=Path, required=True)
     parser.add_argument("--world-size", type=int, required=True)
+    parser.add_argument("--platform", default="ascend_npu")
+    parser.add_argument("--device-type", default="npu")
+    parser.add_argument("--device-count", type=int)
     parser.add_argument("--visible-devices", required=True)
+    parser.add_argument(
+        "--visible-devices-env",
+        default="ASCEND_RT_VISIBLE_DEVICES",
+    )
     parser.add_argument("--parallel-strategy", required=True)
     parser.add_argument("--result-ext", required=True)
     parser.add_argument("--audio-path", type=Path)
@@ -179,6 +231,10 @@ def main(argv: Sequence[str] | None = None) -> int:
             parallel_strategy=arguments.parallel_strategy,
             result_ext=arguments.result_ext,
             audio_path=arguments.audio_path,
+            platform=arguments.platform,
+            device_type=arguments.device_type,
+            device_count=arguments.device_count,
+            visible_devices_env=arguments.visible_devices_env,
         )
     )
     for error in errors:
@@ -187,6 +243,9 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(
         "[Preflight] common checks passed: "
+        f"platform={arguments.platform}, "
+        f"device_type={arguments.device_type}, "
+        f"device_count={arguments.device_count or arguments.world_size}, "
         f"world_size={arguments.world_size}, "
         f"parallel_strategy={arguments.parallel_strategy}, "
         f"devices={arguments.visible_devices}"

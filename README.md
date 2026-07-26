@@ -8,23 +8,33 @@
 - T2I、T2V 服务测速脚本及测试数据；
 - 不同平台、模型和配置下的测速结果留档。
 
-当前仓库主要收录 **昇腾 NPU（Ascend）** 的运行示例，后续可按相同目录结构扩展其他平台。
+当前仓库收录 **昇腾 NPU（Ascend）** 与 **寒武纪 MLU590** 的运行示例。
 
 ## 目录结构
 
 ```text
 .
 ├── configs/                 # 各平台的模型推理配置
-│   └── ascend_npu/
-│       ├── single/          # 单卡配置
-│       ├── dist_2/          # 两卡配置
-│       └── dist_8/          # 八卡配置
+│   ├── ascend_npu/
+│   │   ├── single/          # 单卡配置
+│   │   ├── dist_2/          # 两卡配置
+│   │   └── dist_8/          # 八卡配置
+│   ├── mlu/
+│   │   ├── single/
+│   │   ├── dist_2/
+│   │   └── dist_8/
 ├── scripts/
 │   ├── lib/
 │   │   └── infer_runtime.sh     # 推理归档、通用预检、结果校验和进程管理
 │   ├── preflight_infer.py       # 入口、配置、设备及公共输入预检
 │   ├── run_record.py        # 生成并完成结构化 run.json
 │   ├── logging.sh           # 旧脚本兼容日志入口
+│   ├── mlu/
+│   │   ├── infer/           # MLU 单卡、双卡和八卡离线推理
+│   │   ├── run_infer_suite.py
+│   │   ├── run_all_detached.sh
+│   │   ├── resume_detached.sh
+│   │   └── auto_resume_detached.sh
 │   └── ascend/
 │       ├── infer/           # 离线推理脚本
 │       │   ├── single/
@@ -43,7 +53,78 @@
 
 当前单样本单卡正式测速范围是下文列出的 11 个全重 BF16 用例。Wan2.1 1.3B 仅保留官方推荐的 480p；Wan2.2 MoE 和 HunyuanVideo 1.5 分别保留 480p、720p；图像模型只保留 16:9 原生分辨率档。
 
-## 使用前准备
+## MLU590 离线推理
+
+MLU 入口按当前测试机的固定资源编写：
+
+| 资源 | 固定路径 |
+| --- | --- |
+| Examples 项目 | `/data/Lightx2v-Platform-Run-Examples` |
+| LightX2V 主项目 | `/data/LightX2V-mlu` |
+| 模型权重根目录 | `/data/models` |
+| MLU 推理配置 | `/data/Lightx2v-Platform-Run-Examples/configs/mlu` |
+| LTX-2.3 S2V 默认音频 | `/data/LightX2V-mlu/assets/inputs/audio/seko_input.mp3` |
+
+配置覆盖与 Ascend 相同的 11 个单卡、1 个双卡和 11 个八卡用例，模型规格、分辨率、帧数、步数、seed 及并行策略与下文两个表一致。MLU 使用本地全重 BF16，不启用量化、蒸馏或缓存；Wan2.1 与 Wan2.2 使用 `mlu_sage_attn`，LTX-2.3 DiT 使用 `torch_sdpa` 且 Gemma 使用 `mlu_flash_attn`，其余模型使用 `mlu_flash_attn`。在当前 MLU 算子版本和 Wan2.2 的真实 480p/720p attention shape 下，Sage 微测比 Flash 分别快约 11.5% 和 11.9%，因此正式配置统一选择 Sage。FLUX.2-dev 的 Mistral3 单独注册 `mlu_flash_attn`，避免原生 MLU SDPA 产生 NaN；在 512-token、32Q/8KV 的实际 GQA 形状下，该实现比稳定的 eager 路径快约 17.8%。
+
+入口在加载 LightX2V `base.sh` 后把 `PROFILING_DEBUG_LEVEL` 重置为 `0`，避免逐算子性能统计影响正式推理速度；完整 stdout/stderr、配置和运行元数据仍会归档。
+
+MLU590 每卡为 80 GiB，offload 策略针对当前 `/data/models` 权重优化：
+
+| 用例 | MLU590 策略 |
+| --- | --- |
+| Wan2.2 单卡、CFG2×SP4、TP8 | 全部关闭 CPU offload；80 GiB 可省去 Ascend 64 GiB 配置中的 model 搬运 |
+| Qwen-Image、HunyuanVideo 单卡及 CFG2×SP4 | Qwen2.5-VL 与主模型均不 offload |
+| LTX-2.3 单卡及 SP8 | 约 51.3 GiB Gemma/文本投影编码后回 CPU；约 35.4 GiB DiT 采用 model offload，只在 30 步去噪首尾各搬运一次；约 1.7 GiB VAE/audio 常驻。SP8 仅切序列、不切权重，全常驻至少约 88.4 GiB，不能装入 80 GiB |
+| FLUX.2-dev 单卡 | Mistral3 编码后回 CPU，DiT 采用 model offload 并在 50 步去噪期间整模常驻，VAE 常驻；约 45 GiB 文本编码器与约 60 GiB DiT 不会同时占用 MLU |
+| FLUX.2-dev TP8 | DiT、Mistral3、VAE 均不 offload |
+| Wan2.1、Self-Forcing、LongCat、Z-Image | 无 offload |
+
+运行单个用例：
+
+```bash
+cd /data/Lightx2v-Platform-Run-Examples
+bash scripts/mlu/infer/single/run_wan21_1_3b_t2v_480p_81f.sh
+bash scripts/mlu/infer/dist_8/run_wan21_1_3b_t2v_480p_81f_cfg2_sp4.sh
+```
+
+单独运行入口时，单卡默认使用 MLU 0，双卡默认使用 0、1，八卡默认使用 0–7；可以在启动前显式设置 `MLU_VISIBLE_DEVICES` 映射到其他物理卡。完整 mixed suite 为避免不同卡数组继承同一列表，会固定按 `0`、`0,1`、`0,1,2,3,4,5,6,7` 分配设备。
+
+每个用例的日志和结果按卡数分开保存，失败和中断记录也会保留：
+
+```text
+logs/mlu/infer/single|dist_2|dist_8/<case_id>/<run_id>/
+├── run.log
+└── run.json
+
+results/mlu/infer/single|dist_2|dist_8/<case_id>/<run_id>/
+└── output.png|mp4
+```
+
+顺序执行完整 23 用例并脱离当前终端或 VSCode 会话：
+
+```bash
+cd /data/Lightx2v-Platform-Run-Examples
+bash scripts/mlu/run_all_detached.sh
+```
+
+启动器会立即输出 suite ID、后台 PID、controller 日志和状态文件路径。套件日志位于 `logs/mlu/infer/suites/<suite_id>/controller.log`，可恢复状态位于同目录的 `suite.json`。套件默认在单个用例失败后继续，确保其余模型仍被执行；同样以脱离会话的方式恢复失败或未完成的用例：
+
+```bash
+bash scripts/mlu/resume_detached.sh <suite_id>
+```
+
+如果正在运行的套件修正了失败配置，可预先挂接一次自动恢复。它会等待当前 controller 退出，再以新代码仅重跑失败或产物无效的用例：
+
+```bash
+bash scripts/mlu/auto_resume_detached.sh <suite_id> [controller_pid]
+```
+
+等待日志保存为同一 suite 目录下的 `auto_resume.log`，恢复阶段的输出继续追加到 `controller.log`。自动恢复进程同样使用独立 session，不依赖 VS Code 或当前终端。
+
+也可用 `--scope single`、`--scope multi` 或重复传入 `--only <case_id>` 运行子集。MLU 环境强制使用本地权重并设置 Hugging Face/Transformers 离线模式，因此断开编辑器或网络不影响已经启动的套件。
+
+## Ascend 使用前准备
 
 本仓库的昇腾推理入口按当前测试机编写，路径和设备号直接写在各入口顶部，不通过路径环境变量覆盖：
 
@@ -61,7 +142,7 @@
 1. `/data/wushuo1/LightX2V` 可以在当前昇腾环境正常推理。
 2. 对应用例的权重已经位于 `/data/wushuo1/models/<模型目录>`。
 3. 配置文件和本地测试数据存在。
-4. 建议安装 `ffprobe` 以完整校验视频编码、分辨率和帧数；未安装时会退化为 MP4 容器签名校验，不影响启动推理。
+4. 需要 `ffprobe` 或 PyAV 之一来完整校验视频编码、分辨率和帧数；优先使用 `ffprobe`，未安装时使用 PyAV 全量解码，两者均不可用会将产物校验记为失败。
 5. 单卡入口固定使用 NPU 0，Z-Image-Turbo 两卡入口固定使用 NPU 0、1，八卡入口固定使用 NPU 0–7。
 
 每个入口都采用与 LightX2V 主项目平台脚本一致的可读结构：先声明小写路径和用例参数，显式加载 `scripts/base/base.sh`，并在 `lightx2v_infer` 函数中完整写出 `python` 或 `torchrun` 命令。模型类别、任务、prompt、seed、配置和输出规格均以入口脚本为准。

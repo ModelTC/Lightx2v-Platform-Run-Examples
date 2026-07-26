@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
 
-# Shared lifecycle for the readable Ascend inference entrypoints.
+# Shared lifecycle for readable accelerator inference entrypoints.
 #
 # The entrypoint owns the literal LightX2V command:
 #
@@ -198,7 +198,13 @@ _infer_runtime_validate_integer() {
 
 _infer_runtime_export_contract() {
     local derived_case
+    local device_count_value
+    local device_family
+    local device_type_value
+    local platform_value
     local source_value
+    local visibility_environment
+    local visible_devices_value
 
     world_size="${world_size:-${WORLD_SIZE:-1}}"
     parallel_strategy="${parallel_strategy:-${PARALLEL_STRATEGY:-single}}"
@@ -223,12 +229,73 @@ _infer_runtime_export_contract() {
         return 64
     fi
 
-    if [[ -n "${ascend_rt_visible_devices:-}" ]]; then
-        ASCEND_RT_VISIBLE_DEVICES="${ascend_rt_visible_devices}"
-    elif [[ -z "${ASCEND_RT_VISIBLE_DEVICES:-}" && "${world_size}" == "1" ]]; then
-        ASCEND_RT_VISIBLE_DEVICES="0"
+    platform_value="${platform:-${PLATFORM:-ascend_npu}}"
+    if [[ -n "${device_type:-}" ]]; then
+        device_type_value="${device_type}"
+    elif [[ "${platform_value,,}" == *mlu* ]]; then
+        device_type_value="mlu"
+    elif [[ "${platform_value,,}" == *metax* || "${platform_value,,}" == *cuda* ]]; then
+        device_type_value="cuda"
+    elif [[ "${platform_value,,}" == *ascend* || "${platform_value,,}" == *npu* ]]; then
+        device_type_value="npu"
+    else
+        device_type_value="${DEVICE_TYPE:-npu}"
     fi
-    export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-}"
+    if ! [[ "${platform_value}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        echo "[ERROR] invalid platform: ${platform_value}" >&2
+        return 64
+    fi
+    if ! [[ "${device_type_value}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
+        echo "[ERROR] invalid device_type: ${device_type_value}" >&2
+        return 64
+    fi
+
+    if [[ "${device_type_value,,}:${platform_value,,}" == *mlu* ]]; then
+        device_family="mlu"
+        visibility_environment="MLU_VISIBLE_DEVICES"
+        if [[ -n "${visible_devices:-}" ]]; then
+            visible_devices_value="${visible_devices}"
+        elif [[ -n "${mlu_visible_devices:-}" ]]; then
+            visible_devices_value="${mlu_visible_devices}"
+        elif [[ -n "${MLU_VISIBLE_DEVICES:-}" ]]; then
+            visible_devices_value="${MLU_VISIBLE_DEVICES:-}"
+        else
+            visible_devices_value="${VISIBLE_DEVICES:-}"
+        fi
+    elif [[ "${device_type_value,,}" == "cuda" \
+        || "${device_type_value,,}" == "gpu" \
+        || "${platform_value,,}" == *metax* \
+        || "${platform_value,,}" == *cuda* ]]; then
+        device_family="cuda"
+        visibility_environment="CUDA_VISIBLE_DEVICES"
+        if [[ -n "${visible_devices:-}" ]]; then
+            visible_devices_value="${visible_devices}"
+        elif [[ -n "${cuda_visible_devices:-}" ]]; then
+            visible_devices_value="${cuda_visible_devices}"
+        elif [[ -n "${CUDA_VISIBLE_DEVICES:-}" ]]; then
+            visible_devices_value="${CUDA_VISIBLE_DEVICES:-}"
+        else
+            visible_devices_value="${VISIBLE_DEVICES:-}"
+        fi
+    else
+        device_family="npu"
+        visibility_environment="ASCEND_RT_VISIBLE_DEVICES"
+        if [[ -n "${visible_devices:-}" ]]; then
+            visible_devices_value="${visible_devices}"
+        elif [[ -n "${ascend_rt_visible_devices:-}" ]]; then
+            visible_devices_value="${ascend_rt_visible_devices}"
+        elif [[ -n "${ASCEND_RT_VISIBLE_DEVICES:-}" ]]; then
+            visible_devices_value="${ASCEND_RT_VISIBLE_DEVICES:-}"
+        else
+            visible_devices_value="${VISIBLE_DEVICES:-}"
+        fi
+    fi
+    if [[ -z "${visible_devices_value}" && "${world_size}" == "1" ]]; then
+        visible_devices_value="0"
+    fi
+
+    device_count_value="${device_count:-${DEVICE_COUNT:-${world_size}}}"
+    _infer_runtime_validate_integer device_count "${device_count_value}" || return $?
 
     export REPO_ROOT="${repo_path}"
     export LIGHTX2V_PATH="${lightx2v_path}"
@@ -250,11 +317,28 @@ _infer_runtime_export_contract() {
     export SOURCE_SCRIPT="${source_script}"
     export WORLD_SIZE="${world_size}"
     export PARALLEL_STRATEGY="${parallel_strategy}"
-    export PLATFORM="ascend_npu"
+    export PLATFORM="${platform_value}"
+    export DEVICE_TYPE="${device_type_value}"
+    export DEVICE_FAMILY="${device_family}"
+    export VISIBLE_DEVICES="${visible_devices_value}"
+    export DEVICE_VISIBILITY_ENV="${visibility_environment}"
+    export DEVICE_COUNT="${device_count_value}"
+    if [[ "${device_family}" == "mlu" ]]; then
+        export MLU_VISIBLE_DEVICES="${visible_devices_value}"
+        export MLU_COUNT="${device_count_value}"
+    elif [[ "${device_family}" == "cuda" ]]; then
+        export CUDA_VISIBLE_DEVICES="${visible_devices_value}"
+        export GPU_COUNT="${device_count_value}"
+    else
+        export ASCEND_RT_VISIBLE_DEVICES="${visible_devices_value}"
+        export NPU_COUNT="${device_count_value}"
+    fi
     export TASK="infer"
-    export NPU_COUNT="${world_size}"
-    export DEVICE_MEMORY_GIB="${DEVICE_MEMORY_GIB:-64}"
-    export DEVICE_ID="${ASCEND_RT_VISIBLE_DEVICES}"
+    if [[ -z "${DEVICE_MEMORY_GIB:-}" && "${device_family}" == "npu" ]]; then
+        DEVICE_MEMORY_GIB=64
+    fi
+    export DEVICE_MEMORY_GIB="${DEVICE_MEMORY_GIB:-}"
+    export DEVICE_ID="${visible_devices_value}"
     export RUN_MODE="single_sample_single_card"
     if (( world_size > 1 )); then
         export RUN_MODE="single_sample_multi_card"
@@ -273,7 +357,7 @@ _infer_runtime_create_run_paths() {
     local run_log_dir
     local run_result_dir
 
-    device_tag="npu${ASCEND_RT_VISIBLE_DEVICES//,/-}"
+    device_tag="${DEVICE_TYPE}${VISIBLE_DEVICES//,/-}"
     run_id="${run_id:-${RUN_ID:-$(date -u +%Y%m%dT%H%M%SZ)_${device_tag}_p$$}}"
     if ! [[ "${run_id}" =~ ^[A-Za-z0-9][A-Za-z0-9._-]*$ ]]; then
         echo "[ERROR] invalid run_id: ${run_id}" >&2
@@ -281,8 +365,8 @@ _infer_runtime_create_run_paths() {
     fi
     export RUN_ID="${run_id}"
 
-    export LOG_ROOT="${log_root:-${LOG_ROOT:-${repo_path}/logs/ascend_npu/infer}}"
-    export RESULT_ROOT="${result_root:-${RESULT_ROOT:-${repo_path}/results/ascend_npu/infer}}"
+    export LOG_ROOT="${log_root:-${LOG_ROOT:-${repo_path}/logs/${PLATFORM}/infer}}"
+    export RESULT_ROOT="${result_root:-${RESULT_ROOT:-${repo_path}/results/${PLATFORM}/infer}}"
     run_log_dir="${LOG_ROOT}/${case_id}/${run_id}"
     run_result_dir="${RESULT_ROOT}/${case_id}/${run_id}"
     if [[ -e "${run_log_dir}" || -e "${run_result_dir}" ]]; then
@@ -315,7 +399,11 @@ _infer_runtime_run_preflight() {
         --source-script "${source_script}"
         --reference-script "${reference_script}"
         --world-size "${world_size}"
-        --visible-devices "${ASCEND_RT_VISIBLE_DEVICES}"
+        --platform "${PLATFORM}"
+        --device-type "${DEVICE_TYPE}"
+        --device-count "${DEVICE_COUNT}"
+        --visible-devices "${VISIBLE_DEVICES}"
+        --visible-devices-env "${DEVICE_VISIBILITY_ENV}"
         --parallel-strategy "${parallel_strategy}"
         --result-ext "${RESULT_EXT}"
     )
@@ -334,13 +422,14 @@ _infer_runtime_run_preflight() {
 
 _infer_runtime_print_header() {
     echo "==============================================================================="
-    echo "LightX2V Ascend inference"
+    echo "LightX2V ${PLATFORM} inference"
     echo "case_id: ${CASE_ID}"
     echo "run_id: ${RUN_ID}"
     echo "mode: ${RUN_MODE}"
     echo "parallel_strategy: ${PARALLEL_STRATEGY}"
     echo "world_size: ${WORLD_SIZE}"
-    echo "devices: ${ASCEND_RT_VISIBLE_DEVICES}"
+    echo "device_type: ${DEVICE_TYPE}"
+    echo "devices: ${VISIBLE_DEVICES}"
     echo "log: ${RUN_LOG_PATH}"
     echo "record: ${RUN_RECORD_PATH}"
     echo "result: ${RESULT_PATH}"
