@@ -38,6 +38,9 @@ export ASCEND_RT_VISIBLE_DEVICES="${ASCEND_RT_VISIBLE_DEVICES:-${visible_devices
 export MASTER_ADDR="${MASTER_ADDR:-127.0.0.1}"
 export MASTER_PORT="${MASTER_PORT:-29500}"
 export HCCL_CONNECT_TIMEOUT="${HCCL_CONNECT_TIMEOUT:-600}"
+# torch_npu reads its own allocator variable. The generic PyTorch setting
+# exported by LightX2V's base.sh is not consumed by the NPU caching allocator.
+export PYTORCH_NPU_ALLOC_CONF="${PYTORCH_NPU_ALLOC_CONF:-expandable_segments:True}"
 
 host="${HOST:-0.0.0.0}"
 port="${PORT:-8000}"
