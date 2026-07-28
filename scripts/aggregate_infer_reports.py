@@ -18,10 +18,28 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Iterable, Sequence
 
-REPO_PATH = Path("/data/wushuo1/Lightx2v-Platform-Run-Examples")
-DEFAULT_SUITES_ROOT = REPO_PATH / "logs" / "ascend_npu" / "infer" / "suites"
-DEFAULT_JSON_OUTPUT = DEFAULT_SUITES_ROOT / "final_report.json"
-DEFAULT_MARKDOWN_OUTPUT = DEFAULT_SUITES_ROOT / "final_report.md"
+REPO_PATH = Path(__file__).resolve().parents[1]
+DEFAULT_PLATFORM = "ascend_npu"
+PLATFORM_REPORTS: dict[str, dict[str, Any]] = {
+    "ascend_npu": {
+        "log_directory": "ascend_npu",
+        "suite_platforms": {"ascend_npu"},
+        "display_name": "Ascend NPU",
+        "report_kind": "ascend_npu_offline_inference_final",
+    },
+    "metax": {
+        "log_directory": "metax",
+        "suite_platforms": {"metax", "metax_cuda"},
+        "display_name": "MetaX C500",
+        "report_kind": "metax_c500_offline_inference_final",
+    },
+    "mlu": {
+        "log_directory": "mlu",
+        "suite_platforms": {"mlu", "cambricon_mlu"},
+        "display_name": "Cambricon MLU590",
+        "report_kind": "mlu590_offline_inference_final",
+    },
+}
 REPORT_SCHEMA_VERSION = "1.0"
 ARTIFACT_VALIDATION_SCHEMA_VERSION = "1.0"
 STRICT_REVALIDATION_SCHEMA_VERSION = "1.0"
@@ -65,8 +83,13 @@ TERMINAL_FAILURE_STATUSES = {
     "timed_out",
 }
 INCOMPLETE_STATUSES = {"pending", "queued", "running", "unknown"}
+SUITE_SUCCESS_STATUSES = {"passed", "success"}
 STRICT_VALIDATION_METHODS = {
-    "png": {"Pillow.Image.verify", "PNG signature and IHDR"},
+    "png": {
+        "Pillow.Image.verify",
+        "Pillow.Image.verify + RGB extrema",
+        "PNG signature and IHDR",
+    },
     "mp4": {"ffprobe", "PyAV full decode"},
 }
 
@@ -255,6 +278,12 @@ def metric_summary(record: dict[str, Any]) -> dict[str, Any]:
         "dit_seconds_per_step": number_value(
             metrics.get("dit_seconds_per_step")
         ),
+        "dit_first_step_seconds": number_value(
+            metrics.get("dit_first_step_seconds")
+        ),
+        "dit_step_profile": (
+            dict_value(metrics.get("dit_step_profile")) or None
+        ),
         "generated_frames_per_second": number_value(
             metrics.get("generated_frames_per_second")
         ),
@@ -290,7 +319,7 @@ def classify_attempt(
         and artifact_valid
         and artifact_strict
         and case_id_matches
-        and suite_status == "passed"
+        and suite_status in SUITE_SUCCESS_STATUSES
     )
     if eligible_success:
         return "succeeded", True
@@ -416,7 +445,7 @@ def make_attempt(
     elif (
         record.get("status") == "succeeded"
         and artifact.get("valid") is True
-        and suite_case.get("status") != "passed"
+        and suite_case.get("status") not in SUITE_SUCCESS_STATUSES
     ):
         errors.append(
             "run artifact succeeded but suite case status is "
@@ -506,7 +535,7 @@ def discover_suite_directories(
     elif suites_root.is_dir():
         candidates.extend(
             path.resolve(strict=False)
-            for path in suites_root.glob("suite_*")
+            for path in suites_root.iterdir()
             if path.is_dir() and (path / "suite.json").is_file()
         )
 
@@ -516,7 +545,32 @@ def discover_suite_directories(
     return sorted(unique.values(), key=lambda path: str(path))
 
 
-def aggregate(suite_directories: Sequence[Path]) -> dict[str, Any]:
+def expanded_suite_attempts(suite_case: dict[str, Any]) -> list[dict[str, Any]]:
+    """Normalize both Ascend's flat cases and MLU/MetaX attempt histories."""
+    attempts = list_value(suite_case.get("attempts"))
+    if not attempts:
+        return [suite_case]
+
+    expanded: list[dict[str, Any]] = []
+    for attempt in attempts:
+        if not isinstance(attempt, dict):
+            continue
+        merged = dict(suite_case)
+        merged.pop("attempts", None)
+        merged.update(attempt)
+        # MLU/MetaX store the controller verdict on the case and the process
+        # result in each run.json. Preserve that case verdict for eligibility.
+        merged["status"] = suite_case.get("status")
+        expanded.append(merged)
+    return expanded
+
+
+def aggregate(
+    suite_directories: Sequence[Path],
+    *,
+    platform_key: str = DEFAULT_PLATFORM,
+) -> dict[str, Any]:
+    platform_report = PLATFORM_REPORTS[platform_key]
     warnings: list[str] = []
     suites: list[dict[str, Any]] = []
     attempts_by_case: dict[str, list[dict[str, Any]]] = {
@@ -530,6 +584,17 @@ def aggregate(suite_directories: Sequence[Path]) -> dict[str, Any]:
         suite, error = read_json(suite_path)
         if error or suite is None:
             warnings.append(f"{suite_path}: {error or 'invalid suite record'}")
+            continue
+        suite_platform = string_value(suite.get("platform"))
+        accepted_platforms = platform_report["suite_platforms"]
+        if (
+            suite_platform is not None
+            and suite_platform not in accepted_platforms
+        ):
+            warnings.append(
+                f"{suite_path}: ignored platform {suite_platform!r}; "
+                f"report platform is {platform_key!r}"
+            )
             continue
         suite_id = string_value(suite.get("suite_id")) or suite_dir.name
         suites.append(
@@ -547,23 +612,24 @@ def aggregate(suite_directories: Sequence[Path]) -> dict[str, Any]:
                     f"{suite_path}: ignored non-object case entry"
                 )
                 continue
-            discovery_order += 1
-            attempt = make_attempt(
-                suite_dir,
-                suite,
-                suite_case_raw,
-                discovery_order,
-                warnings,
-            )
-            if attempt is None:
-                continue
-            case_id = string_value(suite_case_raw.get("case_id"))
-            if case_id in attempts_by_case:
-                attempts_by_case[case_id].append(attempt)
-            else:
-                extra_attempts.append(
-                    {"case_id": case_id, **public_attempt(attempt)}
+            for normalized_attempt in expanded_suite_attempts(suite_case_raw):
+                discovery_order += 1
+                attempt = make_attempt(
+                    suite_dir,
+                    suite,
+                    normalized_attempt,
+                    discovery_order,
+                    warnings,
                 )
+                if attempt is None:
+                    continue
+                case_id = string_value(suite_case_raw.get("case_id"))
+                if case_id in attempts_by_case:
+                    attempts_by_case[case_id].append(attempt)
+                else:
+                    extra_attempts.append(
+                        {"case_id": case_id, **public_attempt(attempt)}
+                    )
 
     case_reports: list[dict[str, Any]] = []
     for index, case_id in enumerate(CASE_ORDER, start=1):
@@ -619,7 +685,11 @@ def aggregate(suite_directories: Sequence[Path]) -> dict[str, Any]:
     )
     return {
         "schema_version": REPORT_SCHEMA_VERSION,
-        "report_kind": "ascend_npu_offline_inference_final",
+        "report_kind": platform_report["report_kind"],
+        "platform": {
+            "key": platform_key,
+            "display_name": platform_report["display_name"],
+        },
         "generated_at_utc": utc_now(),
         "status": (
             "complete"
@@ -669,8 +739,10 @@ def format_number(value: Any) -> str:
 
 def render_markdown(report: dict[str, Any]) -> str:
     summary = dict_value(report.get("summary"))
+    platform = dict_value(report.get("platform"))
+    display_name = string_value(platform.get("display_name")) or "Accelerator"
     lines = [
-        "# Ascend NPU Offline Inference Final Report",
+        f"# {display_name} Offline Inference Final Report",
         "",
         f"- Generated (UTC): `{report['generated_at_utc']}`",
         f"- Report status: `{report['status']}`",
@@ -692,18 +764,29 @@ def render_markdown(report: dict[str, Any]) -> str:
         (
             "For each case, the selected result is the latest run whose "
             "`run.json` has `status: succeeded`, a versioned strict artifact "
-            "validation, and whose suite case has `status: passed`. "
+            "validation, and whose suite case has a successful controller "
+            "status (`passed` or `success`). "
             "All metrics below come directly from that selected `run.json`."
+        ),
+        (
+            "This is a one-sample offline inference report. `End-to-end (s)` is "
+            "the wall time of that sample, and `DiT/step mean (s)` is computed "
+            "from the sample's synchronized per-step DiT timings. Request-latency "
+            "P50/P90 belong only to the separate 10-sample server benchmark and "
+            "are intentionally not reported here."
         ),
         "",
         "## Final status and metrics",
         "",
         (
-            "| # | Case | Status | Selected run | Wall (s) | Load (s) | "
-            "DiT (s) | Pipeline (s) | Total (s) | DiT/step (s) | "
-            "Frames/s | Images/s |"
+            "| # | Case | Status | Selected run | End-to-end (s) | Load (s) | "
+            "DiT (s) | Pipeline (s) | Total (s) | DiT/step mean (s) | "
+            "First DiT step (s) | Frames/s | Images/s |"
         ),
-        "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|---:|",
+        (
+            "|---:|---|---|---|---:|---:|---:|---:|---:|---:|---:|"
+            "---:|---:|"
+        ),
     ]
 
     for case in list_value(report.get("cases")):
@@ -721,6 +804,7 @@ def render_markdown(report: dict[str, Any]) -> str:
             format_number(profile.get("pipeline")),
             format_number(profile.get("total")),
             format_number(metrics.get("dit_seconds_per_step")),
+            format_number(metrics.get("dit_first_step_seconds")),
             format_number(metrics.get("generated_frames_per_second")),
             format_number(metrics.get("images_per_second")),
         ]
@@ -846,47 +930,76 @@ def build_parser() -> argparse.ArgumentParser:
         )
     )
     parser.add_argument(
+        "--platform",
+        choices=tuple(PLATFORM_REPORTS),
+        default=DEFAULT_PLATFORM,
+        help=(
+            "Platform report to generate; this selects platform validation, "
+            "title, and default input/output paths."
+        ),
+    )
+    parser.add_argument(
         "suite_directories",
         nargs="*",
         help=(
             "Suite directories (or suite.json paths). If omitted, scan "
-            "--suites-root for suite_* directories."
+            "--suites-root for child directories containing suite.json."
         ),
     )
     parser.add_argument(
         "--suites-root",
         type=Path,
-        default=DEFAULT_SUITES_ROOT,
-        help=f"Auto-discovery root (default: {DEFAULT_SUITES_ROOT})",
+        default=None,
+        help="Auto-discovery root (default: platform log suites directory)",
     )
     parser.add_argument(
         "--json-output",
         type=Path,
-        default=DEFAULT_JSON_OUTPUT,
-        help=f"JSON output path (default: {DEFAULT_JSON_OUTPUT})",
+        default=None,
+        help="JSON output path (default: <suites-root>/final_report.json)",
     )
     parser.add_argument(
         "--markdown-output",
         type=Path,
-        default=DEFAULT_MARKDOWN_OUTPUT,
-        help=f"Markdown output path (default: {DEFAULT_MARKDOWN_OUTPUT})",
+        default=None,
+        help="Markdown output path (default: <suites-root>/final_report.md)",
     )
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
-    suite_directories = discover_suite_directories(
-        args.suite_directories, args.suites_root.expanduser()
+    platform_report = PLATFORM_REPORTS[args.platform]
+    suites_root = (
+        args.suites_root.expanduser()
+        if args.suites_root is not None
+        else REPO_PATH
+        / "logs"
+        / platform_report["log_directory"]
+        / "infer"
+        / "suites"
     )
-    report = aggregate(suite_directories)
-    atomic_write_json(args.json_output.expanduser(), report)
+    json_output = (
+        args.json_output.expanduser()
+        if args.json_output is not None
+        else suites_root / "final_report.json"
+    )
+    markdown_output = (
+        args.markdown_output.expanduser()
+        if args.markdown_output is not None
+        else suites_root / "final_report.md"
+    )
+    suite_directories = discover_suite_directories(
+        args.suite_directories, suites_root
+    )
+    report = aggregate(suite_directories, platform_key=args.platform)
+    atomic_write_json(json_output, report)
     atomic_write_text(
-        args.markdown_output.expanduser(), render_markdown(report)
+        markdown_output, render_markdown(report)
     )
     summary = report["summary"]
     print(
-        f"Wrote {args.json_output} and {args.markdown_output}: "
+        f"Wrote {json_output} and {markdown_output}: "
         f"{summary['passed']}/{summary['expected_cases']} passed from "
         f"{report['source']['suite_count']} suite(s), "
         f"{summary['failure_attempt_count']} failed attempt(s)."

@@ -11,11 +11,13 @@ from __future__ import annotations
 import hashlib
 import importlib.metadata
 import json
+import math
 import os
 import platform
 import re
 import shutil
 import socket
+import statistics
 import struct
 import subprocess
 import sys
@@ -32,6 +34,17 @@ ARTIFACT_VALIDATION_EXIT_CODE = 74
 PROFILE_RE = re.compile(
     r"\[Profile\]\s+.*?\s+-\s+(?:Level\d+_Log\s+)?"
     r"(?P<label>.*?)\s+cost\s+(?P<seconds>[0-9]+(?:\.[0-9]+)?)\s+seconds"
+)
+PROFILE_DETAIL_RE = re.compile(
+    r"\[Profile\]\s+"
+    r"(?P<rank>Single GPU|Rank\s+(?P<rank_id>\d+))\s+-\s+"
+    r"(?:(?P<level>Level\d+)_Log\s+)?"
+    r"(?P<label>.*?)\s+cost\s+"
+    r"(?P<seconds>[0-9]+(?:\.[0-9]+)?)\s+seconds"
+)
+PROFILE_EVENT_META_RE = re.compile(
+    r"\bsegment=(?P<segment>\d+)/(?P<segments>\d+)\s+"
+    r"step=(?P<step>\d+)/(?P<steps>\d+)\b"
 )
 
 
@@ -555,7 +568,11 @@ def build_start_record() -> dict[str, Any]:
             },
             "profile_seconds_by_label": {},
             "profile_rank_aggregation": None,
+            "dit_step_profile": None,
             "dit_seconds_per_step": None,
+            "dit_first_step_seconds": None,
+            "dit_median_step_seconds": None,
+            "dit_p95_step_seconds": None,
             "generated_frames_per_second": None,
             "images_per_second": None,
             "peak_device_memory_bytes": None,
@@ -1217,6 +1234,281 @@ def parse_profile_metrics(
     return canonical, rounded_aggregates
 
 
+def parse_profile_samples(log_path: Path) -> list[dict[str, Any]]:
+    """Parse rank-preserving profile samples in log order.
+
+    The historical aggregate parser intentionally collapsed all ranks and
+    occurrences. Per-step DiT reporting must retain both: occurrence N on each
+    rank is logical step N, and a distributed step is represented by its
+    slowest rank rather than by a sum across ranks.
+    """
+    samples: list[dict[str, Any]] = []
+    if not log_path.is_file():
+        return samples
+    try:
+        with log_path.open("r", encoding="utf-8", errors="replace") as file_obj:
+            for line in file_obj:
+                match = PROFILE_DETAIL_RE.search(line)
+                if not match:
+                    continue
+                rank_id = match.group("rank_id")
+                level_text = match.group("level")
+                suffix = line[match.end() :]
+                event_meta = PROFILE_EVENT_META_RE.search(suffix)
+                samples.append(
+                    {
+                        "rank": int(rank_id) if rank_id is not None else 0,
+                        "rank_label": match.group("rank"),
+                        "level": (
+                            int(level_text.removeprefix("Level"))
+                            if level_text
+                            else None
+                        ),
+                        "label": match.group("label").strip(),
+                        "seconds": float(match.group("seconds")),
+                        "non_sync": "(non-sync)" in suffix,
+                        "segment": (
+                            int(event_meta.group("segment"))
+                            if event_meta
+                            else None
+                        ),
+                        "segments": (
+                            int(event_meta.group("segments"))
+                            if event_meta
+                            else None
+                        ),
+                        "segment_step": (
+                            int(event_meta.group("step"))
+                            if event_meta
+                            else None
+                        ),
+                        "steps_per_segment": (
+                            int(event_meta.group("steps"))
+                            if event_meta
+                            else None
+                        ),
+                    }
+                )
+    except OSError:
+        return []
+    return samples
+
+
+def _nearest_rank_percentile(values: list[float], percentile: float) -> float | None:
+    if not values:
+        return None
+    ordered = sorted(values)
+    index = max(0, math.ceil(percentile * len(ordered)) - 1)
+    return ordered[min(index, len(ordered) - 1)]
+
+
+def parse_dit_step_profile(
+    log_path: Path,
+    *,
+    expected_steps: int | None,
+    expected_ranks: int | None,
+) -> dict[str, Any]:
+    """Return synchronized ``infer_main`` samples grouped by rank and step."""
+    all_samples = parse_profile_samples(log_path)
+    device_event_samples = [
+        sample
+        for sample in all_samples
+        if sample["label"].casefold()
+        == "🚀 infer_main_device_event".casefold()
+    ]
+    samples = device_event_samples or [
+        sample
+        for sample in all_samples
+        if sample["label"].casefold() == "🚀 infer_main".casefold()
+    ]
+    source_label = (
+        "Level1_Log 🚀 infer_main_device_event"
+        if device_event_samples
+        else "Level1_Log 🚀 infer_main"
+    )
+    event_expected_steps = next(
+        (
+            int(sample["segments"]) * int(sample["steps_per_segment"])
+            for sample in samples
+            if sample.get("segments") and sample.get("steps_per_segment")
+        ),
+        None,
+    )
+    effective_expected_steps = event_expected_steps or expected_steps
+    by_rank: dict[int, list[dict[str, Any]]] = {}
+    for sample in samples:
+        by_rank.setdefault(int(sample["rank"]), []).append(sample)
+
+    observed_ranks = sorted(by_rank)
+    required_ranks = (
+        list(range(expected_ranks))
+        if isinstance(expected_ranks, int) and expected_ranks > 0
+        else observed_ranks
+    )
+    observed_steps = max((len(values) for values in by_rank.values()), default=0)
+    inferred_segments = None
+    if (
+        event_expected_steps is None
+        and isinstance(expected_steps, int)
+        and expected_steps > 0
+        and observed_steps > expected_steps
+        and observed_steps % expected_steps == 0
+    ):
+        # Segmented runners such as Wan Self-Forcing execute the configured
+        # denoising steps once per temporal segment. Older runner logs do not
+        # carry explicit ``segment=N/M step=X/Y`` metadata, but the synchronized
+        # per-rank profile stream still contains every real DiT invocation.
+        inferred_segments = observed_steps // expected_steps
+        effective_expected_steps = observed_steps
+    steps: list[dict[str, Any]] = []
+    for step_offset in range(observed_steps):
+        rank_seconds: dict[str, float] = {}
+        non_sync_ranks: list[int] = []
+        for rank in observed_ranks:
+            rank_samples = by_rank[rank]
+            if step_offset >= len(rank_samples):
+                continue
+            sample = rank_samples[step_offset]
+            rank_seconds[str(rank)] = round(float(sample["seconds"]), 6)
+            if sample["non_sync"]:
+                non_sync_ranks.append(rank)
+        values = list(rank_seconds.values())
+        metadata_sample = next(
+            (
+                by_rank[rank][step_offset]
+                for rank in observed_ranks
+                if step_offset < len(by_rank[rank])
+            ),
+            None,
+        )
+        missing_ranks = [rank for rank in required_ranks if str(rank) not in rank_seconds]
+        rank_max = max(values) if values else None
+        rank_min = min(values) if values else None
+        steps.append(
+            {
+                "step": step_offset + 1,
+                "segment": (
+                    metadata_sample.get("segment")
+                    if metadata_sample is not None
+                    and metadata_sample.get("segment") is not None
+                    else (
+                        step_offset // expected_steps + 1
+                        if inferred_segments is not None
+                        else None
+                    )
+                ),
+                "segment_step": (
+                    metadata_sample.get("segment_step")
+                    if metadata_sample is not None
+                    and metadata_sample.get("segment_step") is not None
+                    else (
+                        step_offset % expected_steps + 1
+                        if inferred_segments is not None
+                        else None
+                    )
+                ),
+                "seconds": round(rank_max, 6) if rank_max is not None else None,
+                "rank_seconds": rank_seconds,
+                "rank_median_seconds": (
+                    round(statistics.median(values), 6) if values else None
+                ),
+                "rank_spread_seconds": (
+                    round(rank_max - rank_min, 6)
+                    if rank_max is not None and rank_min is not None
+                    else None
+                ),
+                "missing_ranks": missing_ranks,
+                "synchronized": not non_sync_ranks,
+                "non_sync_ranks": non_sync_ranks,
+            }
+        )
+
+    rank_counts = {str(rank): len(by_rank.get(rank, [])) for rank in required_ranks}
+    all_synchronized = all(step["synchronized"] for step in steps)
+    ranks_complete = bool(required_ranks) and all(
+        rank_counts[str(rank)] == observed_steps for rank in required_ranks
+    )
+    step_count_matches = (
+        not isinstance(effective_expected_steps, int)
+        or effective_expected_steps <= 0
+        or observed_steps == effective_expected_steps
+    )
+    complete = observed_steps > 0 and ranks_complete and step_count_matches
+    authoritative = complete and all_synchronized
+    step_seconds = [
+        float(step["seconds"])
+        for step in steps
+        if step["seconds"] is not None
+    ]
+
+    warnings: list[str] = []
+    if not samples:
+        warnings.append("no Level1 infer_main profile samples found")
+    if not ranks_complete and samples:
+        warnings.append("per-rank infer_main sample counts are incomplete")
+    if not step_count_matches:
+        warnings.append(
+            f"observed {observed_steps} infer_main steps, "
+            f"expected {effective_expected_steps}"
+        )
+    if inferred_segments is not None:
+        warnings.append(
+            f"inferred {inferred_segments} segments from {observed_steps} "
+            f"synchronized samples and {expected_steps} configured steps"
+        )
+    if not all_synchronized and samples:
+        warnings.append(
+            "non-sync samples are CPU enqueue timings and are not authoritative GPU timings"
+        )
+
+    return {
+        "schema_version": "1.0",
+        "source_label": source_label,
+        "rank_aggregation": "max_per_step",
+        "configured_infer_steps": expected_steps,
+        "inferred_segments": inferred_segments,
+        "expected_steps": effective_expected_steps,
+        "observed_steps": observed_steps,
+        "expected_ranks": expected_ranks,
+        "observed_ranks": observed_ranks,
+        "rank_sample_counts": rank_counts,
+        "complete": complete,
+        "synchronized": all_synchronized if samples else False,
+        "authoritative": authoritative,
+        "warnings": warnings,
+        "summary": {
+            "total_seconds": (
+                round(sum(step_seconds), 6) if step_seconds else None
+            ),
+            "mean_seconds": (
+                round(statistics.fmean(step_seconds), 6)
+                if step_seconds
+                else None
+            ),
+            "first_step_seconds": (
+                round(step_seconds[0], 6) if step_seconds else None
+            ),
+            "median_seconds": (
+                round(statistics.median(step_seconds), 6)
+                if step_seconds
+                else None
+            ),
+            "p95_seconds": (
+                round(_nearest_rank_percentile(step_seconds, 0.95), 6)
+                if step_seconds
+                else None
+            ),
+            "min_seconds": (
+                round(min(step_seconds), 6) if step_seconds else None
+            ),
+            "max_seconds": (
+                round(max(step_seconds), 6) if step_seconds else None
+            ),
+        },
+        "steps": steps,
+    }
+
+
 def finish_record(record: dict[str, Any]) -> tuple[dict[str, Any], int]:
     finished_epoch_seconds = time.time()
     started_epoch_seconds = record.get("timing", {}).get("started_epoch_seconds")
@@ -1245,12 +1537,24 @@ def finish_record(record: dict[str, Any]) -> tuple[dict[str, Any], int]:
     )
 
     infer_steps = target.get("infer_steps")
+    dit_step_profile = parse_dit_step_profile(
+        log_path,
+        expected_steps=infer_steps if isinstance(infer_steps, int) else None,
+        expected_ranks=device_count if isinstance(device_count, int) else None,
+    )
+    dit_step_summary = dit_step_profile["summary"]
     output_frames = target.get("frames")
     dit_seconds = profile_seconds.get("dit")
     pipeline_seconds = profile_seconds.get("pipeline")
     dit_seconds_per_step = None
-    if dit_seconds is not None and isinstance(infer_steps, int) and infer_steps > 0:
-        dit_seconds_per_step = round(dit_seconds / infer_steps, 6)
+    dit_first_step_seconds = None
+    dit_median_step_seconds = None
+    dit_p95_step_seconds = None
+    if dit_step_profile["authoritative"]:
+        dit_seconds_per_step = dit_step_summary["mean_seconds"]
+        dit_first_step_seconds = dit_step_summary["first_step_seconds"]
+        dit_median_step_seconds = dit_step_summary["median_seconds"]
+        dit_p95_step_seconds = dit_step_summary["p95_seconds"]
 
     generated_frames_per_second = None
     images_per_second = None
@@ -1305,7 +1609,11 @@ def finish_record(record: dict[str, Any]) -> tuple[dict[str, Any], int]:
         "profile_seconds": profile_seconds,
         "profile_seconds_by_label": profile_by_label,
         "profile_rank_aggregation": "max" if use_slowest_rank else "last",
+        "dit_step_profile": dit_step_profile,
         "dit_seconds_per_step": dit_seconds_per_step,
+        "dit_first_step_seconds": dit_first_step_seconds,
+        "dit_median_step_seconds": dit_median_step_seconds,
+        "dit_p95_step_seconds": dit_p95_step_seconds,
         "generated_frames_per_second": generated_frames_per_second,
         "images_per_second": images_per_second,
         "peak_device_memory_bytes": None,

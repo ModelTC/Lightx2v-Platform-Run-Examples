@@ -345,7 +345,10 @@ _infer_runtime_export_contract() {
     fi
     export DTYPE="${DTYPE:-BF16}"
     export SENSITIVE_LAYER_DTYPE="${SENSITIVE_LAYER_DTYPE:-None}"
-    export PROFILING_DEBUG_LEVEL="${PROFILING_DEBUG_LEVEL:-2}"
+    # Platform entrypoints set INFER_PROFILE_LEVEL before sourcing LightX2V's
+    # base.sh. Prefer that stable value because base.sh and some historical
+    # case scripts also assign PROFILING_DEBUG_LEVEL while being sourced.
+    export PROFILING_DEBUG_LEVEL="${INFER_PROFILE_LEVEL:-${PROFILING_DEBUG_LEVEL:-2}}"
 
     if [[ -n "${audio_path:-}" ]]; then
         export AUDIO_PATH="${audio_path}"

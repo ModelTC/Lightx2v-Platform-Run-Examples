@@ -19,6 +19,7 @@ REPO_PATH = Path("/data/Lightx2v-Platform-Run-Examples")
 SCRIPTS_PATH = REPO_PATH / "scripts"
 INFER_ROOT = REPO_PATH / "scripts" / "mlu" / "infer"
 SUITE_ROOT = REPO_PATH / "logs" / "mlu" / "infer" / "suites"
+FINAL_REPORT_TOOL = REPO_PATH / "scripts" / "aggregate_infer_reports.py"
 
 sys.path.insert(0, str(SCRIPTS_PATH))
 import run_record as run_record_tools  # noqa: E402
@@ -58,6 +59,33 @@ SUITE_LOCK_HANDLE: Any = None
 
 def utc_now() -> str:
     return datetime.now(timezone.utc).isoformat(timespec="seconds").replace("+00:00", "Z")
+
+
+def generate_final_report() -> dict[str, Any]:
+    result = subprocess.run(
+        [
+            sys.executable,
+            str(FINAL_REPORT_TOOL),
+            "--platform",
+            "mlu",
+        ],
+        cwd=REPO_PATH,
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+    if result.stdout.strip():
+        print(f"[Suite] {result.stdout.strip()}", flush=True)
+    if result.stderr.strip():
+        print(f"[Suite] report stderr: {result.stderr.strip()}", flush=True)
+    return {
+        "status": "succeeded" if result.returncode == 0 else "failed",
+        "exit_code": result.returncode,
+        "generated_at_utc": utc_now(),
+        "markdown": str(SUITE_ROOT / "final_report.md"),
+        "json": str(SUITE_ROOT / "final_report.json"),
+        "error": result.stderr.strip() if result.returncode else "",
+    }
 
 
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
@@ -311,16 +339,27 @@ def run_suite(args: argparse.Namespace) -> int:
         attempt["elapsed_seconds"] = round(time.monotonic() - started, 3)
         record = load_json(record_path) if record_path.is_file() else None
         recorded_status = record.get("status") if record else None
-        case["status"] = (
-            "success"
-            if exit_code == 0 and recorded_status == "succeeded"
-            else "failed"
-        )
+        attempt_valid = False
+        validation_reason = ""
+        if exit_code == 0 and recorded_status == "succeeded":
+            attempt_valid, validation_reason = successful_attempt_is_valid(case)
+        case["status"] = "success" if attempt_valid else "failed"
+        if not attempt_valid:
+            attempt["validation_error"] = (
+                validation_reason
+                or f"exit={exit_code}, run_record_status={recorded_status!r}"
+            )
         print(
             f"[Suite] finish {case_id}: status={case['status']}, "
             f"exit_code={exit_code}, elapsed={attempt['elapsed_seconds']}s",
             flush=True,
         )
+        if not attempt_valid:
+            print(
+                f"[Suite] validation failed {case_id}: "
+                f"{attempt['validation_error']}",
+                flush=True,
+            )
         atomic_write_json(state_path, state)
         if case["status"] == "failed" and args.stop_on_error:
             break
@@ -335,6 +374,8 @@ def run_suite(args: argparse.Namespace) -> int:
         state["status"] = "incomplete"
     state["finished_at_utc"] = utc_now()
     atomic_write_json(state_path, state)
+    state["final_report"] = generate_final_report()
+    atomic_write_json(state_path, state)
 
     success_count = sum(case["status"] == "success" for case in state["cases"])
     failed_count = sum(case["status"] == "failed" for case in state["cases"])
@@ -345,7 +386,12 @@ def run_suite(args: argparse.Namespace) -> int:
     )
     if INTERRUPTED_SIGNAL is not None:
         return 128 + INTERRUPTED_SIGNAL
-    return 0 if state["status"] == "success" else 1
+    return (
+        0
+        if state["status"] == "success"
+        and state["final_report"]["status"] == "succeeded"
+        else 1
+    )
 
 
 def parse_args() -> argparse.Namespace:

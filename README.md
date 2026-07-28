@@ -8,7 +8,7 @@
 - T2I、T2V 服务测速脚本及测试数据；
 - 不同平台、模型和配置下的测速结果留档。
 
-当前仓库收录 **昇腾 NPU（Ascend）** 与 **寒武纪 MLU590** 的运行示例。
+当前仓库收录 **昇腾 NPU（Ascend）**、**寒武纪 MLU590** 与 **MetaX C500** 的运行示例。
 
 ## 目录结构
 
@@ -23,6 +23,10 @@
 │   │   ├── single/
 │   │   ├── dist_2/
 │   │   └── dist_8/
+│   └── metax/
+│       ├── single/
+│       ├── dist_2/
+│       └── dist_8/
 ├── scripts/
 │   ├── lib/
 │   │   └── infer_runtime.sh     # 推理归档、通用预检、结果校验和进程管理
@@ -35,6 +39,11 @@
 │   │   ├── run_all_detached.sh
 │   │   ├── resume_detached.sh
 │   │   └── auto_resume_detached.sh
+│   ├── metax/
+│   │   ├── infer/           # C500 单卡、双卡和八卡离线推理
+│   │   ├── run_infer_suite.py
+│   │   ├── run_all_detached.sh
+│   │   └── resume_detached.sh
 │   └── ascend/
 │       ├── infer/           # 离线推理脚本
 │       │   ├── single/
@@ -52,6 +61,10 @@
 目前仓库包含 Wan2.1、Wan2.1 Self-Forcing、Wan2.2 MoE、HunyuanVideo 1.5、LTX-2.3、FLUX.2-dev、Qwen-Image、LongCat-Image 和 Z-Image-Turbo 等模型示例，覆盖 T2I（文生图）、T2V（文生视频）和 S2V 等任务。
 
 当前单样本单卡正式测速范围是下文列出的 11 个全重 BF16 用例。Wan2.1 1.3B 仅保留官方推荐的 480p；Wan2.2 MoE 和 HunyuanVideo 1.5 分别保留 480p、720p；图像模型只保留 16:9 原生分辨率档。
+
+## MetaX C500 离线推理
+
+MetaX 配置覆盖同一组 11 个单卡、1 个双卡和 11 个八卡用例，固定使用 `/data/LightX2V-metax` 与 `/data/models`。当前 64 GiB C500 的算子、offload、MXLink 拓扑、运行命令、分组日志/结果目录及断点恢复说明见 [`scripts/metax/README.md`](scripts/metax/README.md)。
 
 ## MLU590 离线推理
 

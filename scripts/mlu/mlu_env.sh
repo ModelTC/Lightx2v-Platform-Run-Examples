@@ -22,7 +22,10 @@ export LD_LIBRARY_PATH="/usr/local/neuware/lib64${LD_LIBRARY_PATH:+:${LD_LIBRARY
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
 export PYTHONFAULTHANDLER="${PYTHONFAULTHANDLER:-1}"
 export TOKENIZERS_PARALLELISM=false
-export PROFILING_DEBUG_LEVEL=0
+# Keep the same complete profiling contract as Ascend and MetaX. Callers may
+# explicitly set INFER_PROFILE_LEVEL=0 for a non-reporting exploratory run.
+export INFER_PROFILE_LEVEL="${INFER_PROFILE_LEVEL:-2}"
+export PROFILING_DEBUG_LEVEL="${INFER_PROFILE_LEVEL}"
 # This matrix is single-node and uses the direct MLU-Link fabric.
 export CNCL_IB_DISABLE="${CNCL_IB_DISABLE:-1}"
 

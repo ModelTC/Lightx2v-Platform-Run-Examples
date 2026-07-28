@@ -29,7 +29,7 @@ source "${repo_path}/scripts/mlu/mlu_env.sh"
 
 source "${repo_path}/scripts/lib/infer_runtime.sh"
 source "${lightx2v_path}/scripts/base/base.sh"
-export PROFILING_DEBUG_LEVEL=0
+export PROFILING_DEBUG_LEVEL="${INFER_PROFILE_LEVEL:-2}"
 
 lightx2v_infer() {
     exec python -m lightx2v.infer \

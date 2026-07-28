@@ -1,0 +1,18 @@
+#!/bin/bash
+set -eo pipefail
+
+repo_path=/data/Lightx2v-Platform-Run-Examples
+lightx2v_path=/data/LightX2V-mlu
+model_path=/data/models/LongCat-Image
+config_path="${repo_path}/configs/mlu/dist_8/longcat_image_t2i_1344x768_cfg2_sp4.json"
+
+server_platform=cambricon_mlu
+case_id=longcat_image_t2i_1344x768_cfg2_sp4
+model_cls=longcat_image
+task=t2i
+world_size=8
+parallel_strategy=cfg2_sp4
+visible_devices=0,1,2,3,4,5,6,7
+
+source "${repo_path}/scripts/lib/server_runtime.sh"
+run_lightx2v_server

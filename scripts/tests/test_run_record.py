@@ -195,5 +195,85 @@ class MP4PixelValidationTests(unittest.TestCase):
         pyav_fallback.assert_not_called()
 
 
+class DiTStepProfileTests(unittest.TestCase):
+    def test_distributed_steps_use_slowest_rank_without_cross_rank_sum(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dit-profile-test-") as directory:
+            log_path = Path(directory) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "2026-07-25 06:27:53.264 | INFO | x - [Profile] Rank 0 - Level1_Log 🚀 infer_main cost 1.000000 seconds",
+                        "2026-07-25 06:27:53.265 | INFO | x - [Profile] Rank 1 - Level1_Log 🚀 infer_main cost 1.200000 seconds",
+                        "2026-07-25 06:27:54.264 | INFO | x - [Profile] Rank 1 - Level1_Log 🚀 infer_main cost 0.900000 seconds",
+                        "2026-07-25 06:27:54.265 | INFO | x - [Profile] Rank 0 - Level1_Log 🚀 infer_main cost 0.800000 seconds",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+
+            profile = run_record.parse_dit_step_profile(
+                log_path,
+                expected_steps=2,
+                expected_ranks=2,
+            )
+
+        self.assertTrue(profile["authoritative"])
+        self.assertEqual(
+            [step["seconds"] for step in profile["steps"]],
+            [1.2, 0.9],
+        )
+        self.assertEqual(profile["summary"]["mean_seconds"], 1.05)
+        self.assertEqual(profile["summary"]["median_seconds"], 1.05)
+        self.assertEqual(profile["steps"][0]["rank_spread_seconds"], 0.2)
+
+    def test_non_sync_samples_are_retained_but_not_authoritative(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dit-profile-test-") as directory:
+            log_path = Path(directory) / "run.log"
+            log_path.write_text(
+                "2026-07-25 06:27:53.264 | INFO | x - "
+                "[Profile] Single GPU - Level1_Log 🚀 infer_main "
+                "cost 0.010000 seconds (non-sync)\n",
+                encoding="utf-8",
+            )
+            profile = run_record.parse_dit_step_profile(
+                log_path,
+                expected_steps=1,
+                expected_ranks=1,
+            )
+
+        self.assertFalse(profile["authoritative"])
+        self.assertFalse(profile["synchronized"])
+        self.assertIn("CPU enqueue", " ".join(profile["warnings"]))
+
+    def test_device_events_override_self_forcing_non_sync_samples(self) -> None:
+        with tempfile.TemporaryDirectory(prefix="dit-profile-test-") as directory:
+            log_path = Path(directory) / "run.log"
+            log_path.write_text(
+                "\n".join(
+                    [
+                        "[Profile] Single GPU - Level1_Log 🚀 infer_main cost 0.010000 seconds (non-sync)",
+                        "[Profile] Single GPU - Level1_Log 🚀 infer_main cost 0.011000 seconds (non-sync)",
+                        "[Profile] Single GPU - Level1_Log 🚀 infer_main_device_event cost 1.100000 seconds segment=1/2 step=1/1 (device-event)",
+                        "[Profile] Single GPU - Level1_Log 🚀 infer_main_device_event cost 0.900000 seconds segment=2/2 step=1/1 (device-event)",
+                    ]
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            profile = run_record.parse_dit_step_profile(
+                log_path,
+                expected_steps=1,
+                expected_ranks=1,
+            )
+
+        self.assertTrue(profile["authoritative"])
+        self.assertEqual(profile["expected_steps"], 2)
+        self.assertEqual(profile["observed_steps"], 2)
+        self.assertEqual(profile["source_label"], "Level1_Log 🚀 infer_main_device_event")
+        self.assertEqual(profile["steps"][1]["segment"], 2)
+        self.assertEqual(profile["summary"]["mean_seconds"], 1.0)
+
+
 if __name__ == "__main__":
     unittest.main()
