@@ -13,7 +13,7 @@
     "attn_type": "npu_flash_attn",
     "cpu_offload": true,
     "offload_granularity": "block",
-    "offload_use_npu_events": true,
+    "use_event_offload": true,
     "offload_use_block_slab": true,
     "offload_resident_double_blocks": "all",
     "offload_resident_single_blocks": 36,
