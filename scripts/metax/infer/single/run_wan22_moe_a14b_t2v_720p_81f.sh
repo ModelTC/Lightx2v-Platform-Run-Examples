@@ -2,7 +2,7 @@
 set -eo pipefail
 
 repo_path=/data/Lightx2v-Platform-Run-Examples
-lightx2v_path=/data/LightX2V-metax
+lightx2v_path=/data/LightX2V
 model_path=/data/models/Wan2.2-T2V-A14B
 config_path="${repo_path}/configs/metax/single/wan22_moe_a14b_t2v_720p_81f.json"
 
@@ -22,6 +22,7 @@ offload_strategy=model+component:t5
 reference_script="${lightx2v_path}/scripts/platforms/metax/run_wan22_t2v.sh"
 world_size=1
 parallel_strategy=single
+save_output=0
 
 run_group=single
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -39,8 +40,7 @@ lightx2v_infer() {
         --config_json "${config_path}" \
         --prompt "${prompt}" \
         --negative_prompt "${negative_prompt}" \
-        --seed "${seed}" \
-        --save_result_path "${result_path}"
+        --seed "${seed}"
 }
 
 run_infer lightx2v_infer

@@ -14,11 +14,10 @@
     "sample_shift": 12.0,
     "enable_cfg": true,
     "cpu_offload": true,
-  "offload_granularity": "block",
-  "t5_cpu_offload": true,
-  "vae_cpu_offload": false,
-  "empty_cache_step_interval": 1,
-  "boundary": 0.875,
+    "offload_granularity": "model",
+    "t5_cpu_offload": true,
+    "vae_cpu_offload": false,
+    "boundary": 0.875,
     "use_tiling_vae": false,
     "modulate_type": "torch",
     "rope_type": "torch_real_rope",
@@ -27,9 +26,7 @@
     "parallel": {
         "cfg_p_size": 2,
         "seq_p_size": 4,
-        "seq_p_attn_type": "ulysses-world-p2p",
-        "seq_p_a2a_backend": "world_p2p",
-        "world_collective_compat": true,
-        "world_collective_backend": "world_p2p"
+        "seq_p_attn_type": "ulysses",
+        "seq_p_a2a_backend": "torch"
     }
 }

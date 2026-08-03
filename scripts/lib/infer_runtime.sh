@@ -181,6 +181,24 @@ _infer_runtime_require_inputs() {
     fi
 }
 
+_infer_runtime_normalize_boolean() {
+    local name=$1
+    local value=${2,,}
+
+    case "${value}" in
+        1|true|yes|on)
+            printf '%s\n' "true"
+            ;;
+        0|false|no|off)
+            printf '%s\n' "false"
+            ;;
+        *)
+            echo "[ERROR] ${name} must be a boolean; got: ${2}" >&2
+            return 64
+            ;;
+    esac
+}
+
 _infer_runtime_validate_integer() {
     local name=$1
     local value=$2
@@ -205,6 +223,9 @@ _infer_runtime_export_contract() {
     local source_value
     local visibility_environment
     local visible_devices_value
+
+    save_output="$(_infer_runtime_normalize_boolean save_output "${save_output:-${SAVE_OUTPUT:-true}}")" || return $?
+    export SAVE_OUTPUT="${save_output}"
 
     world_size="${world_size:-${WORLD_SIZE:-1}}"
     parallel_strategy="${parallel_strategy:-${PARALLEL_STRATEGY:-single}}"
@@ -382,7 +403,11 @@ _infer_runtime_create_run_paths() {
 
     run_log_path="${run_log_dir}/run.log"
     run_record_path="${run_log_dir}/run.json"
-    result_path="${run_result_dir}/output.${RESULT_EXT}"
+    if [[ "${SAVE_OUTPUT}" == "true" ]]; then
+        result_path="${run_result_dir}/output.${RESULT_EXT}"
+    else
+        result_path=""
+    fi
     export RUN_LOG_PATH="${run_log_path}"
     export RUN_RECORD_PATH="${run_record_path}"
     export RESULT_PATH="${result_path}"
@@ -435,7 +460,11 @@ _infer_runtime_print_header() {
     echo "devices: ${VISIBLE_DEVICES}"
     echo "log: ${RUN_LOG_PATH}"
     echo "record: ${RUN_RECORD_PATH}"
-    echo "result: ${RESULT_PATH}"
+    if [[ "${SAVE_OUTPUT}" == "true" ]]; then
+        echo "result: ${RESULT_PATH}"
+    else
+        echo "result: disabled (SAVE_OUTPUT=false)"
+    fi
     echo "started_at_utc: ${STARTED_AT_UTC}"
     echo "==============================================================================="
 }
@@ -543,10 +572,16 @@ run_infer() {
         _infer_runtime_fail 64 "${entry_function} must invoke 'exec ${expected_launcher} ...'"
         return $?
     fi
-    if ! grep -q -- "--save_result_path" <<<"${function_definition}" \
-        || ! grep -q -- "result_path" <<<"${function_definition}"; then
+    if [[ "${SAVE_OUTPUT}" == "true" ]]; then
+        if ! grep -q -- "--save_result_path" <<<"${function_definition}" \
+            || ! grep -q -- "result_path" <<<"${function_definition}"; then
+            _infer_runtime_fail 64 \
+                "${entry_function} must save to --save_result_path \"\${result_path}\""
+            return $?
+        fi
+    elif grep -q -- "--save_result_path" <<<"${function_definition}"; then
         _infer_runtime_fail 64 \
-            "${entry_function} must save to --save_result_path \"\${result_path}\""
+            "${entry_function} must not pass --save_result_path when SAVE_OUTPUT=false"
         return $?
     fi
 
@@ -611,7 +646,11 @@ run_infer() {
     echo "final_exit_code: ${final_rc}"
     echo "run.log: ${RUN_LOG_PATH}"
     echo "run.json: ${RUN_RECORD_PATH}"
-    echo "result: ${RESULT_PATH}"
+    if [[ "${SAVE_OUTPUT}" == "true" ]]; then
+        echo "result: ${RESULT_PATH}"
+    else
+        echo "result: disabled (SAVE_OUTPUT=false)"
+    fi
     echo "==============================================================================="
 
     _infer_runtime_disable_traps

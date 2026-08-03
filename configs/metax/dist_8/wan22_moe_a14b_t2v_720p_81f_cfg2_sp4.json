@@ -27,9 +27,7 @@
     "parallel": {
         "cfg_p_size": 2,
         "seq_p_size": 4,
-        "seq_p_attn_type": "ulysses-world-p2p",
-        "seq_p_a2a_backend": "world_p2p",
-        "world_collective_compat": true,
-        "world_collective_backend": "world_p2p"
+        "seq_p_attn_type": "ulysses",
+        "seq_p_a2a_backend": "torch"
     }
 }

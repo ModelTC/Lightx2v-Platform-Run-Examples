@@ -2,7 +2,7 @@
 set -eo pipefail
 
 repo_path=/data/Lightx2v-Platform-Run-Examples
-lightx2v_path=/data/LightX2V-metax
+lightx2v_path=/data/LightX2V
 model_path=/data/models/Qwen-Image-2512
 config_path="${repo_path}/configs/metax/dist_8/qwen_image_2512_t2i_1664x928_cfg2_sp4.json"
 
@@ -22,6 +22,7 @@ offload_strategy=model+component:qwen25vl
 reference_script="${lightx2v_path}/scripts/platforms/metax/qwen_image_t2i_2512.sh"
 world_size=8
 parallel_strategy=cfg2_sp4
+save_output=0
 
 run_group=dist_8
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
@@ -49,7 +50,7 @@ lightx2v_infer() {
         --seed "${seed}" \
         --aspect_ratio "16:9" \
         --target_shape "${output_height}" "${output_width}" \
-        --save_result_path "${result_path}"
+        --return_result_tensor
 }
 
 run_infer lightx2v_infer

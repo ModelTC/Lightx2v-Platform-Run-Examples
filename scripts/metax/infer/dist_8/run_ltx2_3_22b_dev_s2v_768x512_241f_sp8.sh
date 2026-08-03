@@ -2,7 +2,7 @@
 set -eo pipefail
 
 repo_path=/data/Lightx2v-Platform-Run-Examples
-lightx2v_path=/data/LightX2V-metax
+lightx2v_path=/data/LightX2V
 model_path=/data/models/LTX-2
 config_path="${repo_path}/configs/metax/dist_8/ltx2_3_22b_dev_s2v_768x512_241f_sp8.json"
 audio_path="${lightx2v_path}/assets/inputs/audio/seko_input.mp3"
@@ -23,6 +23,7 @@ offload_strategy=model+component:gemma+rank0-io
 reference_script="${lightx2v_path}/scripts/ltx2/ltx2_3/run_ltx2_3_s2v.sh"
 world_size=8
 parallel_strategy=sp8
+save_output=0
 
 run_group=dist_8
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
@@ -40,7 +41,7 @@ lightx2v_infer() {
         --nproc_per_node="${world_size}" \
         --master_addr="${MASTER_ADDR}" \
         --master_port="${MASTER_PORT}" \
-        -m lightx2v.infer \
+        "${repo_path}/scripts/metax/ltx2_no_save_infer.py" \
         --seed "${seed}" \
         --model_cls "${model_cls}" \
         --task "${task}" \
@@ -49,8 +50,7 @@ lightx2v_infer() {
         --audio_path "${audio_path}" \
         --prompt "${prompt}" \
         --negative_prompt "${negative_prompt}" \
-        --target_video_length "${output_frames}" \
-        --save_result_path "${result_path}"
+        --return_result_tensor
 }
 
 run_infer lightx2v_infer

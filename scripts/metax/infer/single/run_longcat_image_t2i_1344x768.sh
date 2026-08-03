@@ -2,7 +2,7 @@
 set -eo pipefail
 
 repo_path=/data/Lightx2v-Platform-Run-Examples
-lightx2v_path=/data/LightX2V-metax
+lightx2v_path=/data/LightX2V
 model_path=/data/models/LongCat-Image
 config_path="${repo_path}/configs/metax/single/longcat_image_t2i_1344x768.json"
 
@@ -22,6 +22,7 @@ offload_strategy=none
 reference_script="${lightx2v_path}/scripts/longcat/longcat_image_t2i.sh"
 world_size=1
 parallel_strategy=single
+save_output=0
 
 run_group=single
 export CUDA_VISIBLE_DEVICES="${CUDA_VISIBLE_DEVICES:-0}"
@@ -32,7 +33,7 @@ source "${lightx2v_path}/scripts/base/base.sh"
 export PROFILING_DEBUG_LEVEL="${INFER_PROFILE_LEVEL:-2}"
 
 lightx2v_infer() {
-    exec python -m lightx2v.infer \
+    exec python "${repo_path}/scripts/metax/longcat_profiled_infer.py" \
         --model_cls "${model_cls}" \
         --task "${task}" \
         --model_path "${model_path}" \
@@ -42,7 +43,7 @@ lightx2v_infer() {
         --seed "${seed}" \
         --aspect_ratio "16:9" \
         --target_shape "${output_height}" "${output_width}" \
-        --save_result_path "${result_path}"
+        --return_result_tensor
 }
 
 run_infer lightx2v_infer

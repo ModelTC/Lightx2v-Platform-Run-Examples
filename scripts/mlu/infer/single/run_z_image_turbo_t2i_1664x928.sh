@@ -2,7 +2,7 @@
 set -eo pipefail
 
 repo_path=/data/Lightx2v-Platform-Run-Examples
-lightx2v_path=/data/LightX2V-mlu
+lightx2v_path=/data/LightX2V
 model_path=/data/models/Z-Image-Turbo
 config_path="${repo_path}/configs/mlu/single/z_image_turbo_t2i_1664x928.json"
 
@@ -22,6 +22,7 @@ offload_strategy=none
 reference_script="${lightx2v_path}/scripts/platforms/mlu/z_image_turbo_t2i.sh"
 world_size=1
 parallel_strategy=single
+save_output=0
 
 run_group=single
 export MLU_VISIBLE_DEVICES="${MLU_VISIBLE_DEVICES:-0}"
@@ -42,7 +43,7 @@ lightx2v_infer() {
         --seed "${seed}" \
         --aspect_ratio "16:9" \
         --target_shape "${output_height}" "${output_width}" \
-        --save_result_path "${result_path}"
+        --return_result_tensor
 }
 
 run_infer lightx2v_infer

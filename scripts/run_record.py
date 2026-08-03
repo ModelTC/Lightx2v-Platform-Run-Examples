@@ -432,6 +432,12 @@ def build_start_record() -> dict[str, Any]:
     reference_script_path = resolve_reference_script()
     prompt = env("PROMPT")
     negative_prompt = env("NEGATIVE_PROMPT")
+    save_output = env("SAVE_OUTPUT", "true").casefold() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     errors = [config_error] if config_error else []
     platform_name = env("PLATFORM", "ascend_npu")
     device = device_context(platform_name)
@@ -474,6 +480,7 @@ def build_start_record() -> dict[str, Any]:
             "precision": env("DTYPE", "BF16"),
             "sensitive_layer_precision": env("SENSITIVE_LAYER_DTYPE", "None"),
             "offload_strategy": env("OFFLOAD_STRATEGY"),
+            "save_output": save_output,
             "target": {
                 "width": env_int("OUTPUT_WIDTH"),
                 "height": env_int("OUTPUT_HEIGHT"),
@@ -544,6 +551,7 @@ def build_start_record() -> dict[str, Any]:
             "error": "",
         },
         "artifact": {
+            "enabled": save_output,
             "path": str(Path(env("RESULT_PATH")).resolve(strict=False)),
             "exists": False,
             "size_bytes": None,
@@ -572,6 +580,7 @@ def build_start_record() -> dict[str, Any]:
             "dit_seconds_per_step": None,
             "dit_first_step_seconds": None,
             "dit_median_step_seconds": None,
+            "dit_steady_state_seconds": None,
             "dit_p95_step_seconds": None,
             "generated_frames_per_second": None,
             "images_per_second": None,
@@ -1173,6 +1182,26 @@ def validate_artifact(
     return artifact
 
 
+def disabled_artifact(result_format: str) -> dict[str, Any]:
+    """Represent an intentionally disabled output without failing the run."""
+    return {
+        "enabled": False,
+        "path": "",
+        "exists": False,
+        "size_bytes": None,
+        "sha256": None,
+        "format": result_format,
+        "valid": True,
+        "validation": {
+            "schema_version": ARTIFACT_VALIDATION_SCHEMA_VERSION,
+            "validator": ARTIFACT_VALIDATOR,
+            "checked": False,
+            "method": "disabled by SAVE_OUTPUT=false",
+            "errors": [],
+        },
+    }
+
+
 def parse_profile_metrics(
     log_path: Path,
     *,
@@ -1493,6 +1522,16 @@ def parse_dit_step_profile(
                 if step_seconds
                 else None
             ),
+            "steady_state_median_seconds": (
+                round(
+                    statistics.median(
+                        step_seconds[1:] if len(step_seconds) > 1 else step_seconds
+                    ),
+                    6,
+                )
+                if step_seconds
+                else None
+            ),
             "p95_seconds": (
                 round(_nearest_rank_percentile(step_seconds, 0.95), 6)
                 if step_seconds
@@ -1520,13 +1559,18 @@ def finish_record(record: dict[str, Any]) -> tuple[dict[str, Any], int]:
     target = record.get("benchmark", {}).get("target", {})
     result_format = record.get("artifact", {}).get("format") or env("RESULT_EXT").lower()
     result_path = Path(env("RESULT_PATH") or record.get("paths", {}).get("result", ""))
-    artifact = validate_artifact(
-        result_path,
-        result_format,
-        target,
-        expected_audio=record.get("benchmark", {}).get("task")
-        in {"s2v", "ltx2_s2v"},
-    )
+    save_output = record.get("benchmark", {}).get("save_output", True)
+    if save_output:
+        artifact = validate_artifact(
+            result_path,
+            result_format,
+            target,
+            expected_audio=record.get("benchmark", {}).get("task")
+            in {"s2v", "ltx2_s2v"},
+        )
+        artifact["enabled"] = True
+    else:
+        artifact = disabled_artifact(result_format)
 
     log_path = Path(env("RUN_LOG_PATH") or record.get("paths", {}).get("run_log", ""))
     device_count = record.get("execution", {}).get("device", {}).get("count")
@@ -1549,11 +1593,13 @@ def finish_record(record: dict[str, Any]) -> tuple[dict[str, Any], int]:
     dit_seconds_per_step = None
     dit_first_step_seconds = None
     dit_median_step_seconds = None
+    dit_steady_state_seconds = None
     dit_p95_step_seconds = None
     if dit_step_profile["authoritative"]:
         dit_seconds_per_step = dit_step_summary["mean_seconds"]
         dit_first_step_seconds = dit_step_summary["first_step_seconds"]
         dit_median_step_seconds = dit_step_summary["median_seconds"]
+        dit_steady_state_seconds = dit_step_summary["steady_state_median_seconds"]
         dit_p95_step_seconds = dit_step_summary["p95_seconds"]
 
     generated_frames_per_second = None
@@ -1613,6 +1659,7 @@ def finish_record(record: dict[str, Any]) -> tuple[dict[str, Any], int]:
         "dit_seconds_per_step": dit_seconds_per_step,
         "dit_first_step_seconds": dit_first_step_seconds,
         "dit_median_step_seconds": dit_median_step_seconds,
+        "dit_steady_state_seconds": dit_steady_state_seconds,
         "dit_p95_step_seconds": dit_p95_step_seconds,
         "generated_frames_per_second": generated_frames_per_second,
         "images_per_second": images_per_second,

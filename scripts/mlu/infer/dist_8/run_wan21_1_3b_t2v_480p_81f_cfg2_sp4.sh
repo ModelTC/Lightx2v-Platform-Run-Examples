@@ -2,7 +2,7 @@
 set -eo pipefail
 
 repo_path=/data/Lightx2v-Platform-Run-Examples
-lightx2v_path=/data/LightX2V-mlu
+lightx2v_path=/data/LightX2V
 model_path=/data/models/Wan2.1-T2V-1.3B
 config_path="${repo_path}/configs/mlu/dist_8/wan21_1_3b_t2v_480p_81f_cfg2_sp4.json"
 
@@ -22,6 +22,7 @@ offload_strategy=none
 reference_script="${lightx2v_path}/scripts/dist_infer/run_wan_t2v_dist_cfg_ulysses.sh"
 world_size=8
 parallel_strategy=cfg2_sp4
+save_output=0
 
 run_group=dist_8
 export MLU_VISIBLE_DEVICES="${MLU_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
@@ -46,8 +47,7 @@ lightx2v_infer() {
         --config_json "${config_path}" \
         --prompt "${prompt}" \
         --negative_prompt "${negative_prompt}" \
-        --seed "${seed}" \
-        --save_result_path "${result_path}"
+        --seed "${seed}"
 }
 
 run_infer lightx2v_infer

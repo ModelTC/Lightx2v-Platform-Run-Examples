@@ -2,7 +2,7 @@
 set -eo pipefail
 
 repo_path=/data/Lightx2v-Platform-Run-Examples
-lightx2v_path=/data/LightX2V-mlu
+lightx2v_path=/data/LightX2V
 model_path=/data/models/HunyuanVideo-1.5
 config_path="${repo_path}/configs/mlu/single/hunyuan_video_15_t2v_720p_121f.json"
 
@@ -22,6 +22,7 @@ offload_strategy=none
 reference_script="${lightx2v_path}/scripts/hunyuan_video_15/run_hy15_t2v_720p.sh"
 world_size=1
 parallel_strategy=single
+save_output=0
 
 run_group=single
 export MLU_VISIBLE_DEVICES="${MLU_VISIBLE_DEVICES:-0}"
@@ -39,8 +40,7 @@ lightx2v_infer() {
         --config_json "${config_path}" \
         --prompt "${prompt}" \
         --negative_prompt "${negative_prompt}" \
-        --seed "${seed}" \
-        --save_result_path "${result_path}"
+        --seed "${seed}"
 }
 
 run_infer lightx2v_infer

@@ -88,6 +88,78 @@ def generate_final_report() -> dict[str, Any]:
     }
 
 
+def generate_benchmark_summary(state: dict[str, Any], suite_dir: Path) -> dict[str, str]:
+    """Write the requested second-repetition no-save timing summary."""
+    repetitions = int(state.get("repetitions", 1))
+    rows: list[dict[str, Any]] = []
+    for case in state["cases"]:
+        if int(case.get("repetition", 1)) != repetitions:
+            continue
+        attempts = case.get("attempts") or []
+        attempt = attempts[-1] if attempts else {}
+        record_path = Path(str(attempt.get("run_record", "")))
+        record = load_json(record_path) if record_path.is_file() else {}
+        metrics = record.get("metrics") if isinstance(record, dict) else {}
+        metrics = metrics if isinstance(metrics, dict) else {}
+        profile = metrics.get("profile_seconds")
+        profile = profile if isinstance(profile, dict) else {}
+        configuration = record.get("configuration") if isinstance(record, dict) else {}
+        configuration = configuration if isinstance(configuration, dict) else {}
+        config_file = configuration.get("file")
+        config_file = config_file if isinstance(config_file, dict) else {}
+        paths = record.get("paths") if isinstance(record, dict) else {}
+        paths = paths if isinstance(paths, dict) else {}
+        rows.append(
+            {
+                "group": case["group"],
+                "case_id": case["case_id"],
+                "repetition": repetitions,
+                "status": case["status"],
+                "parallel_strategy": (record.get("benchmark") or {}).get("parallel_strategy") if isinstance(record, dict) else None,
+                "config_path": config_file.get("path"),
+                "config_sha256": config_file.get("sha256"),
+                "steady_dit_seconds_per_step": metrics.get("dit_median_step_seconds"),
+                "pipeline_cost_seconds": profile.get("pipeline"),
+                "run_log": paths.get("run_log"),
+                "run_record": paths.get("run_record"),
+            }
+        )
+
+    json_path = suite_dir / "second_run_results.json"
+    markdown_path = suite_dir / "second_run_results.md"
+    atomic_write_json(
+        json_path,
+        {
+            "suite_id": state["suite_id"],
+            "repetition_used": repetitions,
+            "metric_definitions": {
+                "steady_dit_seconds_per_step": "median synchronized DiT step cost",
+                "pipeline_cost_seconds": "LightX2V RUN pipeline profile cost",
+            },
+            "cases": rows,
+        },
+    )
+    lines = [
+        f"# MLU no-save benchmark: {state['suite_id']}",
+        "",
+        f"Only repetition {repetitions} is authoritative. Output-file saving was disabled.",
+        "",
+        "| Group | Case | Parallel | Status | Steady DiT (s/step) | Pipeline cost (s) | Run log |",
+        "|---|---|---|---|---:|---:|---|",
+    ]
+    for row in rows:
+        steady = row["steady_dit_seconds_per_step"]
+        pipeline = row["pipeline_cost_seconds"]
+        steady_text = f"{steady:.6f}" if isinstance(steady, (int, float)) else "—"
+        pipeline_text = f"{pipeline:.6f}" if isinstance(pipeline, (int, float)) else "—"
+        lines.append(
+            f"| {row['group']} | `{row['case_id']}` | {row['parallel_strategy'] or '—'} | "
+            f"{row['status']} | {steady_text} | {pipeline_text} | `{row['run_log'] or ''}` |"
+        )
+    markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"json": str(json_path), "markdown": str(markdown_path)}
+
+
 def atomic_write_json(path: Path, payload: dict[str, Any]) -> None:
     temporary = path.with_name(f".{path.name}.{os.getpid()}.tmp")
     with temporary.open("w", encoding="utf-8") as file_obj:
@@ -135,7 +207,7 @@ def handle_signal(signum: int, _frame: object) -> None:
             pass
 
 
-def select_cases(args: argparse.Namespace) -> list[tuple[str, str, str]]:
+def select_cases(args: argparse.Namespace) -> list[tuple[str, str, str, int]]:
     selected = list(CASES)
     if args.scope == "single":
         selected = [case for case in selected if case[0] == "single"]
@@ -148,10 +220,14 @@ def select_cases(args: argparse.Namespace) -> list[tuple[str, str, str]]:
         if unknown:
             raise ValueError(f"unknown --only case(s): {', '.join(unknown)}")
         selected = [case for case in selected if case[1] in requested]
-    return selected
+    return [
+        (*case, repetition)
+        for case in selected
+        for repetition in range(1, args.repetitions + 1)
+    ]
 
 
-def build_initial_state(suite_id: str, selected: list[tuple[str, str, str]]) -> dict[str, Any]:
+def build_initial_state(suite_id: str, selected: list[tuple[str, str, str, int]]) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "suite_id": suite_id,
@@ -162,17 +238,19 @@ def build_initial_state(suite_id: str, selected: list[tuple[str, str, str]]) -> 
         "started_at_utc": utc_now(),
         "finished_at_utc": None,
         "status": "running",
+        "repetitions": max(repetition for _, _, _, repetition in selected),
         "pid": os.getpid(),
         "cases": [
             {
                 "index": index,
                 "group": group,
                 "case_id": case_id,
+                "repetition": repetition,
                 "script": str(INFER_ROOT / relative_script),
                 "status": "pending",
                 "attempts": [],
             }
-            for index, (group, case_id, relative_script) in enumerate(selected, start=1)
+            for index, (group, case_id, relative_script, repetition) in enumerate(selected, start=1)
         ],
     }
 
@@ -206,9 +284,28 @@ def successful_attempt_is_valid(case: dict[str, Any]) -> tuple[bool, str]:
         return False, f"cannot read run record: {exc}"
     if record.get("status") != "succeeded":
         return False, f"run record status is {record.get('status')!r}"
+    metrics = record.get("metrics")
+    profile = metrics.get("profile_seconds") if isinstance(metrics, dict) else None
+    pipeline = profile.get("pipeline") if isinstance(profile, dict) else None
+    steady_dit = metrics.get("dit_median_step_seconds") if isinstance(metrics, dict) else None
+    pipeline_optional = str(case.get("case_id", "")).startswith(
+        "longcat_image_"
+    )
+    if (
+        not pipeline_optional
+        and (not isinstance(pipeline, (int, float)) or pipeline <= 0)
+    ):
+        return False, "run record has no positive pipeline cost"
+    if not isinstance(steady_dit, (int, float)) or steady_dit <= 0:
+        return False, "run record has no positive steady-state DiT metric"
     artifact = record.get("artifact")
     if not isinstance(artifact, dict) or artifact.get("valid") is not True:
         return False, "run record artifact is not valid"
+    if artifact.get("enabled") is False:
+        validation = artifact.get("validation")
+        if not isinstance(validation, dict) or validation.get("checked") is not False:
+            return False, "disabled artifact record is malformed"
+        return True, ""
     artifact_path_value = artifact.get("path")
     if not isinstance(artifact_path_value, str) or not artifact_path_value:
         return False, "run record artifact has no path"
@@ -278,10 +375,12 @@ def run_suite(args: argparse.Namespace) -> int:
     for case in state["cases"]:
         if INTERRUPTED_SIGNAL is not None:
             break
-        if case["status"] == "success":
+        if case["status"] in {"success", "failed"}:
             valid, reason = successful_attempt_is_valid(case)
             if valid:
-                print(f"[Suite] skip successful case: {case['case_id']}", flush=True)
+                case["status"] = "success"
+                atomic_write_json(state_path, state)
+                print(f"[Suite] skip valid completed case: {case['case_id']}", flush=True)
                 continue
             case["status"] = "failed"
             atomic_write_json(state_path, state)
@@ -322,7 +421,8 @@ def run_suite(args: argparse.Namespace) -> int:
         started = time.monotonic()
         print(
             f"\n[Suite] ({case['index']}/{len(state['cases'])}) start "
-            f"{group}/{case_id}, run_id={run_id}",
+            f"{group}/{case_id}, repetition={case.get('repetition', 1)}, "
+            f"run_id={run_id}",
             flush=True,
         )
         ACTIVE_PROCESS = subprocess.Popen(
@@ -373,6 +473,7 @@ def run_suite(args: argparse.Namespace) -> int:
     else:
         state["status"] = "incomplete"
     state["finished_at_utc"] = utc_now()
+    state["benchmark_summary"] = generate_benchmark_summary(state, suite_dir)
     atomic_write_json(state_path, state)
     state["final_report"] = generate_final_report()
     atomic_write_json(state_path, state)
@@ -402,6 +503,14 @@ def parse_args() -> argparse.Namespace:
     suite_selection.add_argument("--suite-id", help="new suite identifier")
     suite_selection.add_argument("--resume", help="resume an existing suite identifier")
     parser.add_argument("--stop-on-error", action="store_true")
+    parser.add_argument(
+        "--repetitions",
+        type=int,
+        choices=range(1, 11),
+        default=1,
+        metavar="N",
+        help="run each selected entrypoint N consecutive times",
+    )
     return parser.parse_args()
 
 

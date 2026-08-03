@@ -196,6 +196,85 @@ def generate_final_report() -> dict[str, Any]:
     }
 
 
+def generate_benchmark_summary(state: dict[str, Any], suite_dir: Path) -> dict[str, str]:
+    """Write a compact summary using only the final requested repetition."""
+    repetitions = int(state.get("repetitions", 1))
+    rows: list[dict[str, Any]] = []
+    for case in state["cases"]:
+        if int(case.get("repetition", 1)) != repetitions:
+            continue
+        attempts = case.get("attempts") or []
+        attempt = attempts[-1] if attempts else {}
+        record_path_value = str(attempt.get("run_record", ""))
+        record_path = Path(record_path_value) if record_path_value else None
+        record = (
+            load_json(record_path)
+            if record_path is not None and record_path.is_file()
+            else {}
+        )
+        metrics = record.get("metrics") if isinstance(record, dict) else {}
+        metrics = metrics if isinstance(metrics, dict) else {}
+        profile = metrics.get("profile_seconds")
+        profile = profile if isinstance(profile, dict) else {}
+        benchmark = record.get("benchmark") if isinstance(record, dict) else {}
+        benchmark = benchmark if isinstance(benchmark, dict) else {}
+        configuration = record.get("configuration") if isinstance(record, dict) else {}
+        configuration = configuration if isinstance(configuration, dict) else {}
+        config_file = configuration.get("file")
+        config_file = config_file if isinstance(config_file, dict) else {}
+        rows.append(
+            {
+                "group": case["group"],
+                "case_id": case["case_id"],
+                "repetition": repetitions,
+                "status": case["status"],
+                "parallel_strategy": benchmark.get("parallel_strategy"),
+                "config_path": config_file.get("path"),
+                "config_sha256": config_file.get("sha256"),
+                "steady_dit_seconds_per_step": metrics.get("dit_steady_state_seconds"),
+                "pipeline_cost_seconds": profile.get("pipeline"),
+                "run_log": (
+                    str(record_path.with_name("run.log"))
+                    if record_path is not None
+                    else ""
+                ),
+                "run_record": str(record_path) if record_path is not None else "",
+            }
+        )
+
+    payload = {
+        "suite_id": state["suite_id"],
+        "repetition_used": repetitions,
+        "metric_definitions": {
+            "steady_dit_seconds_per_step": "median synchronized DiT step cost after excluding the first step; distributed steps use the slowest rank",
+            "pipeline_cost_seconds": "LightX2V RUN pipeline profile cost with output-file saving disabled",
+        },
+        "cases": rows,
+    }
+    json_path = suite_dir / "second_run_results.json"
+    markdown_path = suite_dir / "second_run_results.md"
+    atomic_write_json(json_path, payload)
+    lines = [
+        f"# MetaX no-save benchmark: {state['suite_id']}",
+        "",
+        f"Only repetition {repetitions} is authoritative.",
+        "",
+        "| Group | Case | Parallel | Status | Steady DiT (s/step) | Pipeline cost (s) | Run log |",
+        "|---|---|---|---|---:|---:|---|",
+    ]
+    for row in rows:
+        steady = row["steady_dit_seconds_per_step"]
+        pipeline = row["pipeline_cost_seconds"]
+        steady_text = f"{steady:.6f}" if isinstance(steady, (int, float)) else "—"
+        pipeline_text = f"{pipeline:.6f}" if isinstance(pipeline, (int, float)) else "—"
+        lines.append(
+            f"| {row['group']} | `{row['case_id']}` | {row['parallel_strategy'] or '—'} | "
+            f"{row['status']} | {steady_text} | {pipeline_text} | `{row['run_log']}` |"
+        )
+    markdown_path.write_text("\n".join(lines) + "\n", encoding="utf-8")
+    return {"json": str(json_path), "markdown": str(markdown_path)}
+
+
 def gpu_release_cooldown_remaining(
     last_release_monotonic: float,
     now_monotonic: float,
@@ -715,6 +794,23 @@ def validate_successful_case(
     if not isinstance(artifact, dict) or artifact.get("valid") is not True:
         return False, "artifact was not recorded as valid"
     validation = artifact.get("validation")
+    if artifact.get("enabled") is False:
+        if not isinstance(validation, dict) or validation.get("checked") is not False:
+            return False, "disabled artifact record is malformed"
+        if not require_dit_profile:
+            return True, "ok"
+        metrics = record.get("metrics")
+        profile = metrics.get("profile_seconds") if isinstance(metrics, dict) else None
+        pipeline = profile.get("pipeline") if isinstance(profile, dict) else None
+        steady_dit = metrics.get("dit_steady_state_seconds") if isinstance(metrics, dict) else None
+        dit_step_profile = metrics.get("dit_step_profile") if isinstance(metrics, dict) else None
+        if not isinstance(pipeline, (int, float)) or isinstance(pipeline, bool) or pipeline <= 0:
+            return False, "run record has no positive pipeline cost"
+        if not isinstance(steady_dit, (int, float)) or isinstance(steady_dit, bool) or steady_dit <= 0:
+            return False, "run record has no positive steady-state DiT metric"
+        if not isinstance(dit_step_profile, dict) or dit_step_profile.get("authoritative") is not True:
+            return False, "run record DiT step profile is not authoritative"
+        return True, "ok"
     recovery = validation.get("validation_only_recovery") if isinstance(validation, dict) else None
     if isinstance(recovery, dict):
         recovery_key = (case.get("case_id"), attempt.get("run_id"))
@@ -1381,7 +1477,7 @@ def wait_for_case_process(
         return 124, timeout_status
 
 
-def select_cases(args: argparse.Namespace) -> list[tuple[str, str, str]]:
+def select_cases(args: argparse.Namespace) -> list[tuple[str, str, str, int]]:
     selected = list(CASES)
     if args.scope == "single":
         selected = [case for case in selected if case[0] == "single"]
@@ -1394,10 +1490,14 @@ def select_cases(args: argparse.Namespace) -> list[tuple[str, str, str]]:
         if unknown:
             raise ValueError(f"unknown --only case(s): {', '.join(unknown)}")
         selected = [case for case in selected if case[1] in requested]
-    return selected
+    return [
+        (*case, repetition)
+        for case in selected
+        for repetition in range(1, args.repetitions + 1)
+    ]
 
 
-def build_initial_state(suite_id: str, selected: list[tuple[str, str, str]]) -> dict[str, Any]:
+def build_initial_state(suite_id: str, selected: list[tuple[str, str, str, int]]) -> dict[str, Any]:
     return {
         "schema_version": 1,
         "suite_id": suite_id,
@@ -1408,17 +1508,19 @@ def build_initial_state(suite_id: str, selected: list[tuple[str, str, str]]) -> 
         "started_at_utc": utc_now(),
         "finished_at_utc": None,
         "status": "running",
+        "repetitions": max(repetition for _, _, _, repetition in selected),
         "pid": os.getpid(),
         "cases": [
             {
                 "index": index,
                 "group": group,
                 "case_id": case_id,
+                "repetition": repetition,
                 "script": str(INFER_ROOT / relative_script),
                 "status": "pending",
                 "attempts": [],
             }
-            for index, (group, case_id, relative_script) in enumerate(selected, start=1)
+            for index, (group, case_id, relative_script, repetition) in enumerate(selected, start=1)
         ],
     }
 
@@ -1497,7 +1599,7 @@ def run_suite(args: argparse.Namespace) -> int:
 
 def run_locked_suite(
     args: argparse.Namespace,
-    selected: list[tuple[str, str, str]],
+    selected: list[tuple[str, str, str, int]],
     suite_id: str,
     suite_dir: Path,
 ) -> int:
@@ -1596,7 +1698,10 @@ def run_locked_suite(
             mccl_shm_before = snapshot_mccl_shm_files()
 
         attempt_number = len(case["attempts"]) + 1
-        run_id = f"{suite_id}_{int(case['index']):02d}_a{attempt_number}"
+        run_id = (
+            f"{suite_id}_{int(case['index']):02d}_"
+            f"r{int(case.get('repetition', 1))}_a{attempt_number}"
+        )
         record_path = REPO_PATH / "logs" / "metax" / "infer" / group / case_id / run_id / "run.json"
         result_dir = REPO_PATH / "results" / "metax" / "infer" / group / case_id / run_id
         attempt = {
@@ -1640,7 +1745,8 @@ def run_locked_suite(
         env.pop("ASCEND_RT_VISIBLE_DEVICES", None)
         started = time.monotonic()
         print(
-            f"\n[Suite] ({case['index']}/{len(state['cases'])}) start {group}/{case_id}, run_id={run_id}",
+            f"\n[Suite] ({case['index']}/{len(state['cases'])}) start "
+            f"{group}/{case_id}, repetition={case.get('repetition', 1)}, run_id={run_id}",
             flush=True,
         )
         process = subprocess.Popen(
@@ -1798,8 +1904,13 @@ def run_locked_suite(
     else:
         state["status"] = "incomplete"
     state["finished_at_utc"] = utc_now()
+    state["benchmark_summary"] = generate_benchmark_summary(state, suite_dir)
     atomic_write_json(state_path, state)
-    state["final_report"] = generate_final_report()
+    state["final_report"] = (
+        {"status": "skipped", "reason": "no-save benchmark"}
+        if args.skip_final_report
+        else generate_final_report()
+    )
     atomic_write_json(state_path, state)
 
     success_count = sum(case["status"] == "success" for case in state["cases"])
@@ -1813,7 +1924,7 @@ def run_locked_suite(
     return (
         0
         if state["status"] == "success"
-        and state["final_report"]["status"] == "succeeded"
+        and state["final_report"]["status"] in {"succeeded", "skipped"}
         else 1
     )
 
@@ -1826,6 +1937,19 @@ def parse_args() -> argparse.Namespace:
     suite_source.add_argument("--suite-id", help="new suite identifier")
     suite_source.add_argument("--resume", help="resume an existing suite identifier")
     parser.add_argument("--stop-on-error", action="store_true")
+    parser.add_argument(
+        "--repetitions",
+        type=int,
+        choices=range(1, 11),
+        default=1,
+        metavar="N",
+        help="run each selected entrypoint N consecutive times",
+    )
+    parser.add_argument(
+        "--skip-final-report",
+        action="store_true",
+        help="skip the artifact-oriented historical aggregate report",
+    )
     parser.add_argument(
         "--stall-timeout-seconds",
         type=int,

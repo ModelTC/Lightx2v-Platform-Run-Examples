@@ -225,6 +225,10 @@ class DiTStepProfileTests(unittest.TestCase):
         )
         self.assertEqual(profile["summary"]["mean_seconds"], 1.05)
         self.assertEqual(profile["summary"]["median_seconds"], 1.05)
+        self.assertEqual(
+            profile["summary"]["steady_state_median_seconds"],
+            0.9,
+        )
         self.assertEqual(profile["steps"][0]["rank_spread_seconds"], 0.2)
 
     def test_non_sync_samples_are_retained_but_not_authoritative(self) -> None:

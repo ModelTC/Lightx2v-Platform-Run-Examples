@@ -2,7 +2,7 @@
 set -eo pipefail
 
 repo_path=/data/Lightx2v-Platform-Run-Examples
-lightx2v_path=/data/LightX2V-mlu
+lightx2v_path=/data/LightX2V
 model_path=/data/models/LongCat-Image
 config_path="${repo_path}/configs/mlu/dist_8/longcat_image_t2i_1344x768_cfg2_sp4.json"
 
@@ -22,6 +22,7 @@ offload_strategy=none
 reference_script="${lightx2v_path}/scripts/longcat/longcat_image_t2i_cfg_parallel.sh"
 world_size=8
 parallel_strategy=cfg2_sp4
+save_output=0
 
 run_group=dist_8
 export MLU_VISIBLE_DEVICES="${MLU_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
@@ -49,7 +50,7 @@ lightx2v_infer() {
         --seed "${seed}" \
         --aspect_ratio "16:9" \
         --target_shape "${output_height}" "${output_width}" \
-        --save_result_path "${result_path}"
+        --return_result_tensor
 }
 
 run_infer lightx2v_infer
