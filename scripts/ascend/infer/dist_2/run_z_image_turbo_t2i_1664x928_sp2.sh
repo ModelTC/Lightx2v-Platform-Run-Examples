@@ -24,6 +24,7 @@ world_size=2
 parallel_strategy=sp2
 
 export PLATFORM=ascend_npu
+export BENCHMARK_NO_SAVE=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1
 export MASTER_ADDR=127.0.0.1
 export MASTER_PORT=29500
@@ -47,7 +48,7 @@ lightx2v_infer() {
         --seed "${seed}" \
         --aspect_ratio "16:9" \
         --target_shape "${output_height}" "${output_width}" \
-        --save_result_path "${result_path}"
+        --return_result_tensor
 }
 
 run_infer lightx2v_infer

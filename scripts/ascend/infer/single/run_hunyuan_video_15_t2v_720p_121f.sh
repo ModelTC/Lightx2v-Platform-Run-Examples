@@ -24,6 +24,7 @@ world_size=1
 parallel_strategy=single
 
 export PLATFORM=ascend_npu
+export BENCHMARK_NO_SAVE=1
 export ASCEND_RT_VISIBLE_DEVICES=0
 
 source "${repo_path}/scripts/lib/infer_runtime.sh"
@@ -38,7 +39,7 @@ lightx2v_infer() {
         --prompt "${prompt}" \
         --negative_prompt "${negative_prompt}" \
         --seed "${seed}" \
-        --save_result_path "${result_path}"
+        --return_result_tensor
 }
 
 run_infer lightx2v_infer

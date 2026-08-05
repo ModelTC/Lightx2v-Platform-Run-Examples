@@ -540,7 +540,13 @@ run_infer() {
         _infer_runtime_fail 64 "${entry_function} must invoke 'exec ${expected_launcher} ...'"
         return $?
     fi
-    if ! grep -q -- "--save_result_path" <<<"${function_definition}" \
+    if [[ "${BENCHMARK_NO_SAVE:-0}" == "1" ]]; then
+        if ! grep -q -- "--return_result_tensor" <<<"${function_definition}"; then
+            _infer_runtime_fail 64 \
+                "${entry_function} must use --return_result_tensor in BENCHMARK_NO_SAVE mode"
+            return $?
+        fi
+    elif ! grep -q -- "--save_result_path" <<<"${function_definition}" \
         || ! grep -q -- "result_path" <<<"${function_definition}"; then
         _infer_runtime_fail 64 \
             "${entry_function} must save to --save_result_path \"\${result_path}\""

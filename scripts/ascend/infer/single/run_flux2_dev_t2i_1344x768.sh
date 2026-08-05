@@ -24,6 +24,7 @@ world_size=1
 parallel_strategy=single
 
 export PLATFORM=ascend_npu
+export BENCHMARK_NO_SAVE=1
 export ASCEND_RT_VISIBLE_DEVICES=0
 
 source "${repo_path}/scripts/lib/infer_runtime.sh"
@@ -40,7 +41,7 @@ lightx2v_infer() {
         --seed "${seed}" \
         --aspect_ratio "16:9" \
         --target_shape "${output_height}" "${output_width}" \
-        --save_result_path "${result_path}"
+        --return_result_tensor
 }
 
 run_infer lightx2v_infer

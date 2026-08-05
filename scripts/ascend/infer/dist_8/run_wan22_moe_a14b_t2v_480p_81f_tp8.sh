@@ -24,6 +24,7 @@ world_size=8
 parallel_strategy=tp8
 
 export PLATFORM=ascend_npu
+export BENCHMARK_NO_SAVE=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export MASTER_ADDR=127.0.0.1
 export MASTER_PORT=29500
@@ -45,7 +46,7 @@ lightx2v_infer() {
         --prompt "${prompt}" \
         --negative_prompt "${negative_prompt}" \
         --seed "${seed}" \
-        --save_result_path "${result_path}"
+        --return_result_tensor
 }
 
 run_infer lightx2v_infer

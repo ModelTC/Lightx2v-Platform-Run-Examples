@@ -1228,13 +1228,28 @@ def finish_record(record: dict[str, Any]) -> tuple[dict[str, Any], int]:
     target = record.get("benchmark", {}).get("target", {})
     result_format = record.get("artifact", {}).get("format") or env("RESULT_EXT").lower()
     result_path = Path(env("RESULT_PATH") or record.get("paths", {}).get("result", ""))
-    artifact = validate_artifact(
-        result_path,
-        result_format,
-        target,
-        expected_audio=record.get("benchmark", {}).get("task")
-        in {"s2v", "ltx2_s2v"},
-    )
+    benchmark_no_save = env("BENCHMARK_NO_SAVE") == "1"
+    if benchmark_no_save:
+        artifact = {
+            "path": None,
+            "format": result_format,
+            "size_bytes": None,
+            "sha256": None,
+            "valid": True,
+            "validation": {
+                **validation_record(),
+                "skipped": True,
+                "reason": "BENCHMARK_NO_SAVE=1",
+            },
+        }
+    else:
+        artifact = validate_artifact(
+            result_path,
+            result_format,
+            target,
+            expected_audio=record.get("benchmark", {}).get("task")
+            in {"s2v", "ltx2_s2v"},
+        )
 
     log_path = Path(env("RUN_LOG_PATH") or record.get("paths", {}).get("run_log", ""))
     device_count = record.get("execution", {}).get("device", {}).get("count")

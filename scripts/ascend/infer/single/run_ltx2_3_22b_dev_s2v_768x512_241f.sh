@@ -4,10 +4,10 @@ set -e
 repo_path=/data/wushuo1/Lightx2v-Platform-Run-Examples
 lightx2v_path=/data/wushuo1/LightX2V
 model_path=/data/wushuo1/models/LTX-2
-config_path="${repo_path}/configs/ascend_npu/single/ltx2_3_22b_dev_s2v_768x512_241f.json"
+config_path="${repo_path}/configs/ascend_npu/single/ltx2_3_22b_dev_s2v_768x512_81f.json"
 audio_path="${lightx2v_path}/assets/inputs/audio/seko_input.mp3"
 
-case_id=ltx2_3_22b_dev_s2v_768x512_241f
+case_id=ltx2_3_22b_dev_s2v_768x512_81f
 model_id=LTX-2.3-22B-dev
 model_cls=ltx2
 task=ltx2_s2v
@@ -17,7 +17,7 @@ seed=42
 result_ext=mp4
 output_width=768
 output_height=512
-output_frames=241
+output_frames=81
 infer_steps=30
 offload_strategy=model+component:gemma
 reference_script="${lightx2v_path}/scripts/platforms/ascend_npu/run_ltx2_3_s2v.sh"
@@ -25,6 +25,7 @@ world_size=1
 parallel_strategy=single
 
 export PLATFORM=ascend_npu
+export BENCHMARK_NO_SAVE=1
 export ASCEND_RT_VISIBLE_DEVICES=0
 
 source "${repo_path}/scripts/lib/infer_runtime.sh"
@@ -40,8 +41,7 @@ lightx2v_infer() {
         --audio_path "${audio_path}" \
         --prompt "${prompt}" \
         --negative_prompt "${negative_prompt}" \
-        --target_video_length "${output_frames}" \
-        --save_result_path "${result_path}"
+        --return_result_tensor
 }
 
 run_infer lightx2v_infer

@@ -4,7 +4,7 @@ set -e
 repo_path=/data/wushuo1/Lightx2v-Platform-Run-Examples
 lightx2v_path=/data/wushuo1/LightX2V
 model_path=/data/wushuo1/models/FLUX.2-dev
-config_path="${repo_path}/configs/ascend_npu/dist_8/flux2_dev_t2i_1344x768_tp8.json"
+config_path="${repo_path}/configs/ascend_npu/dist_8/flux2_dev_t2i_1344x768_tp8_infer.json"
 
 case_id=flux2_dev_t2i_1344x768_tp8
 model_id=FLUX.2-dev
@@ -18,12 +18,13 @@ output_width=1344
 output_height=768
 output_frames=1
 infer_steps=50
-offload_strategy=none
-reference_script="${lightx2v_path}/scripts/flux2/infer_flux2_dev_dist.sh"
+offload_strategy=block
+reference_script="${lightx2v_path}/scripts/platforms/ascend_npu/flux2_dev_t2i.sh"
 world_size=8
 parallel_strategy=tp8
 
 export PLATFORM=ascend_npu
+export BENCHMARK_NO_SAVE=1
 export ASCEND_RT_VISIBLE_DEVICES=0,1,2,3,4,5,6,7
 export MASTER_ADDR=127.0.0.1
 export MASTER_PORT=29500
@@ -47,7 +48,7 @@ lightx2v_infer() {
         --seed "${seed}" \
         --aspect_ratio "16:9" \
         --target_shape "${output_height}" "${output_width}" \
-        --save_result_path "${result_path}"
+        --return_result_tensor
 }
 
 run_infer lightx2v_infer
