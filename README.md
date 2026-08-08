@@ -223,6 +223,13 @@ bash scripts/ascend/infer/dist_8/run_wan21_1_3b_t2v_480p_81f_cfg2_sp4.sh
 
 ## 启动服务
 
+使用单卡配置启动 FLUX.2-dev T2I 服务：
+
+```bash
+cd /data/wushuo1/Lightx2v-Platform-Run-Examples
+bash scripts/ascend/server/single/start_server_flux2_dev_t2i_1344x768.sh
+```
+
 多卡服务入口与 `scripts/ascend/infer/dist_2`、`dist_8` 的测试配置一一对应。例如启动八卡 Wan2.1 T2V 服务：
 
 ```bash
