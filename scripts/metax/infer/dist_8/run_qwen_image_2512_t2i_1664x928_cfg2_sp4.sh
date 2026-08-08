@@ -4,7 +4,7 @@ set -eo pipefail
 repo_path=/data/Lightx2v-Platform-Run-Examples
 lightx2v_path=/data/LightX2V
 model_path=/data/models/Qwen-Image-2512
-config_path="${repo_path}/configs/metax/dist_8/qwen_image_2512_t2i_1664x928_cfg2_sp4.json"
+config_path="${CONFIG_PATH:-${repo_path}/configs/metax/dist_8/qwen_image_2512_t2i_1664x928_cfg2_sp4.json}"
 
 case_id=qwen_image_2512_t2i_1664x928_cfg2_sp4
 model_id=Qwen-Image-2512
@@ -18,7 +18,7 @@ output_width=1664
 output_height=928
 output_frames=1
 infer_steps=50
-offload_strategy=model+component:qwen25vl
+offload_strategy="${OFFLOAD_STRATEGY:-block+component:qwen25vl}"
 reference_script="${lightx2v_path}/scripts/platforms/metax/qwen_image_t2i_2512.sh"
 world_size=8
 parallel_strategy=cfg2_sp4
