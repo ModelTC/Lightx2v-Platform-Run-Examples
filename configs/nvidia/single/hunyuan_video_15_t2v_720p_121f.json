@@ -1,0 +1,25 @@
+{
+    "infer_steps": 50,
+    "transformer_model_name": "720p_t2v",
+    "fps": 24,
+    "target_video_length": 121,
+    "vae_stride": [
+        4,
+        16,
+        16
+    ],
+    "sample_shift": 9.0,
+    "sample_guide_scale": 6.0,
+    "aspect_ratio": "16:9",
+    "enable_cfg": true,
+    "attn_type": "flash_attn2",
+    "cpu_offload": false,
+    "qwen25vl_cpu_offload": true,
+    "byt5_cpu_offload": false,
+    "vae_cpu_offload": false,
+    "modulate_type": "torch",
+    "rope_type": "torch_real_rope",
+    "layer_norm_type": "torch",
+    "rms_norm_type": "torch",
+    "use_compile": false
+}
