@@ -11,7 +11,7 @@
     "qwen_image_rank_aware_model_offload": true,
     "qwen_image_model_offload_release_only": true,
     "qwen25vl_cpu_offload": true,
-    "qwen_image_single_rank_text_encoder": true,
+    "text_encoder_mode": "rank0_broadcast",
     "qwen_image_resident_text_encoder": false,
     "vae_cpu_offload": false,
     "vae_decode_parallel": true,

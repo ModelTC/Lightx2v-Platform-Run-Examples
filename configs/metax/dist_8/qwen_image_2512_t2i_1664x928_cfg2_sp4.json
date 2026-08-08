@@ -14,7 +14,7 @@
     "offload_resident_policy": "interleaved",
     "offload_persistent_resident_blocks": true,
     "qwen25vl_cpu_offload": true,
-    "qwen_image_single_rank_text_encoder": true,
+    "text_encoder_mode": "rank0_broadcast",
     "qwen_image_resident_text_encoder": true,
     "vae_cpu_offload": false,
     "vae_decode_parallel": true,
